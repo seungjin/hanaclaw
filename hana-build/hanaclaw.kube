@@ -1,0 +1,13 @@
+[Unit]
+Description=Hanaclaw - AI Stack Pod (Ollama, Qdrant, ZeroClaw)
+After=network-online.target
+
+[Kube]
+# Absolute path to your pod.yaml file
+Yaml=%h/.config/containers/hanaclaw.yaml
+
+# Automatically pull updated images on service restart if needed
+AutoUpdate=registry
+
+[Install]
+WantedBy=default.target

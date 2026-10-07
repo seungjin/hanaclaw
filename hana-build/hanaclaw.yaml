@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bigbang
+spec:
+  containers:
+    - name: ollama
+      image: docker.io/ollama/ollama:latest
+      ports:
+        - containerPort: 11434
+          hostPort: 9100
+      volumeMounts:
+        - mountPath: /root/.ollama
+          name: ollama-data
+
+    - name: qdrant
+      image: docker.io/qdrant/qdrant:latest
+      ports:
+        - containerPort: 6333
+          hostPort: 9110
+        - containerPort: 6334
+          hostPort: 9120
+      volumeMounts:
+        - mountPath: /qdrant/storage
+          name: qdrant-data
+
+    - name: zeroclaw
+      image: docker.io/zeroclaw/zeroclaw:latest
+      ports:
+        - containerPort: 42617
+          hostPort: 9130
+      env:
+        - name: OLLAMA_HOST
+          value: "http://localhost:11434"
+        - name: QDRANT_HOST
+          value: "http://localhost:6333"
+      volumeMounts:
+        - mountPath: /zeroclaw-data
+          name: zeroclaw-data
+
+  volumes:
+    - name: ollama-data
+      persistentVolumeClaim:
+        claimName: ollama_data
+
+    - name: qdrant-data
+      persistentVolumeClaim:
+        claimName: qdrant_storage
+
+    - name: zeroclaw-data
+      persistentVolumeClaim:
+        claimName: zeroclaw_data
