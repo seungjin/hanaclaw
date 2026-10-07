@@ -69,7 +69,9 @@ pub use redact::scrub_credentials;
 pub(crate) use results_collect::{
     CollectedResults, check_identical_output_abort, collect_tool_results,
 };
-pub use steering::drain_steering_messages;
+pub use steering::{
+    SteeringAdmission, SteeringAdmit, SteeringInput, SteeringPosture, drain_steering_messages,
+};
 #[cfg(test)]
 pub(crate) use stream_consume::consume_provider_streaming_response;
 pub(crate) use tool_specs::{IterationToolSpecs, build_iteration_tool_specs};
@@ -676,7 +678,7 @@ pub struct ToolLoop<'a> {
     pub channel: Option<&'a dyn Channel>,
     pub collected_receipts: Option<&'a std::sync::Mutex<Vec<String>>>,
     pub event_tx: Option<tokio::sync::mpsc::Sender<TurnEvent>>,
-    pub steering: Option<&'a mut tokio::sync::mpsc::Receiver<String>>,
+    pub steering: Option<&'a mut tokio::sync::mpsc::Receiver<SteeringInput>>,
     pub new_messages_out: Option<&'a mut Vec<ChatMessage>>,
     pub image_cache: Option<ToolLoopImageState<'a>>,
     pub ingress: IngressContext,
@@ -1619,7 +1621,17 @@ pub async fn run_tool_call_loop(mut p: ToolLoop<'_>) -> Result<String> {
                 merged
             });
         let excluded_tools: &[String] = step_scoped_excluded.as_deref().unwrap_or(excluded_tools);
-        for steering_message in drain_steering_messages(&mut steering) {
+
+        for steering_input in drain_steering_messages(&mut steering) {
+            // This loop cannot narrow its registry mid-run, so it admits only
+            // a sender that is still authorized and whose posture narrows
+            // nothing; anything else is dropped rather than run with more
+            // than the sender now holds.
+            match steering_input.admit() {
+                SteeringAdmission::Admitted(posture) if posture == SteeringPosture::default() => {}
+                _ => continue,
+            }
+            let steering_message = steering_input.into_text();
             match ingress_policy(&steering_message, &ingress, &ingress_policy_cfg) {
                 // DEFAULT — append the injection to history exactly as today.
                 IngressDecision::Loop => {}
@@ -3279,7 +3291,7 @@ fn sop_step_excluded_tools(
 #[derive(Clone)]
 pub struct SopStepReassembly<'a> {
     pub config: &'a zeroclaw_config::schema::Config,
-    pub live_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
+    pub live_config: Option<zeroclaw_config::live::LiveConfigHandle>,
 }
 
 /// The re-assembly gate: a step needs its own agent context re-assembled when
@@ -3371,7 +3383,7 @@ impl OwnedAgentExecution {
 #[cfg(test)]
 pub(crate) async fn assemble_owned_execution(
     config: &zeroclaw_config::schema::Config,
-    live_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
+    live_config: Option<zeroclaw_config::live::LiveConfigHandle>,
     alias: &str,
     sop_engine: Arc<std::sync::Mutex<crate::sop::SopEngine>>,
     sop_audit: Option<Arc<crate::sop::SopAuditLogger>>,
@@ -3391,7 +3403,7 @@ pub(crate) async fn assemble_owned_execution(
 
 pub(crate) async fn assemble_owned_execution_with_admission(
     config: &zeroclaw_config::schema::Config,
-    live_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
+    live_config: Option<zeroclaw_config::live::LiveConfigHandle>,
     alias: &str,
     sop_engine: Arc<std::sync::Mutex<crate::sop::SopEngine>>,
     sop_audit: Option<Arc<crate::sop::SopAuditLogger>>,
@@ -6459,14 +6471,14 @@ mod sop_step_reassembly_tests {
                 ..AliasedAgentConfig::default()
             },
         );
-        let live_config = Arc::new(parking_lot::RwLock::new(config.clone()));
+        let live_config = zeroclaw_config::live::LiveConfig::new(config.clone());
         let engine = Arc::new(std::sync::Mutex::new(crate::sop::SopEngine::new(
             SopConfig::default(),
         )));
 
         let owned = assemble_owned_execution(
             &config,
-            Some(Arc::clone(&live_config)),
+            Some(live_config.handle()),
             "stepper",
             Arc::clone(&engine),
             None,
@@ -6487,11 +6499,11 @@ mod sop_step_reassembly_tests {
             .expect("first run");
         assert!(first.success, "allowlisted local endpoint should pass");
 
+        let mut reloaded = live_config.snapshot();
+        reloaded.file_download.allowed_private_hosts.clear();
         live_config
-            .write()
-            .file_download
-            .allowed_private_hosts
-            .clear();
+            .publish(live_config.next_revision().unwrap(), reloaded)
+            .unwrap();
 
         let second = file_download.execute(args).await.expect("second run");
         assert!(
