@@ -1,24 +1,32 @@
 # Dockerfile.skill-exec
 FROM alpine:latest
 
-# 1. Install Alpine tools & dependencies
-RUN apk add --no-cache uv gcompat git curl wget bash
+# Define the build argument with a default fallback version
+ARG PYTHON_VERSION=3.14
 
-# 2. Install default CPython release
-RUN uv python install 3.12
+# 1. Install Alpine system dependencies
+RUN apk add --no-cache uv gcompat git curl wget bash fish wasmtime
 
-# 3. Create global symlinks dynamically for installed Python
-RUN PYTHON_BIN=$(uv python find 3.12) && \
+# 2. Set UV Environment Variables FIRST
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+ENV UV_TOOL_BIN_DIR=/opt/uv/bin
+ENV PATH="/root/.local/bin:/opt/uv/bin:/opt/uv/python/bin:${PATH}"
+
+ENV UV_SYSTEM_PYTHON=1
+ENV UV_NO_PROJECT=1
+ENV UV_PYTHON_PREFERENCE=managed
+
+# 3. Install the Python version passed via ARG
+RUN uv python install ${PYTHON_VERSION}
+
+# 4. Create global symlinks AFTER Python is installed
+RUN PYTHON_BIN=$(uv python find ${PYTHON_VERSION}) && \
     ln -sf "$PYTHON_BIN" /usr/bin/python3 && \
     ln -sf "$PYTHON_BIN" /usr/bin/python
 
-# 4. Configure UV environment
-ENV UV_SYSTEM_PYTHON=1
-ENV UV_NO_PROJECT=1
-# Allow uv to use its managed/installed Python
-ENV UV_PYTHON_PREFERENCE=managed
+# 5. Grant global execution permissions for /opt/uv
+RUN chmod -R 755 /opt/uv
 
+# 6. Set up workspace
+RUN mkdir -p /workspace
 WORKDIR /workspace
-
-
-

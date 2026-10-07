@@ -157,7 +157,7 @@ RUN for binary in zeroclaw zerocode; do \
 FROM ${ZEROCLAW_BASE_ALPINE} AS runtime
 
 RUN apk add --no-cache bash ca-certificates curl git tzdata \
-    podman podman-docker \
+    podman podman-docker fuse-overlayfs iptables \
     && mkdir -p /zeroclaw-data/.zeroclaw /zeroclaw-data/data
 
 RUN sed -i 's/#cgroups = "enabled"/cgroups = "disabled"/' /etc/containers/containers.conf \
