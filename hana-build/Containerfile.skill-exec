@@ -5,7 +5,7 @@ FROM alpine:latest
 ARG PYTHON_VERSION=3.14
 
 # 1. Install Alpine system dependencies
-RUN apk add --no-cache uv gcompat git curl wget bash fish wasmtime
+RUN apk add --no-cache uv gcompat git curl wget bash fish wasmtime go
 
 # 2. Set UV Environment Variables FIRST
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
