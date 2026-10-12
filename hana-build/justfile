@@ -1,0 +1,4 @@
+
+
+build:
+    podman build --no-cache -f hana-build/Containerfile.hanaclaw --build-arg ZEROCLAW_BUILD_ID=$(git rev-parse --short HEAD) -t ghcr.io/seungjin/hanaclaw:latest ./
