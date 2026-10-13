@@ -159,6 +159,11 @@ impl DockerRuntime {
         let network = self.config.network.trim();
         if !network.is_empty() {
             process.arg("--network").arg(network);
+            if let Some(pod_name) = network.strip_prefix("pod:") {
+                process.arg("--pod").arg(pod_name);
+            } else {
+                process.arg("--network").arg(network);
+            }
         }
 
         if let Some(memory_limit_mb) = self.config.memory_limit_mb.filter(|mb| *mb > 0) {
