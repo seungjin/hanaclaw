@@ -158,7 +158,6 @@ impl DockerRuntime {
 
         let network = self.config.network.trim();
         if !network.is_empty() {
-            process.arg("--network").arg(network);
             if let Some(pod_name) = network.strip_prefix("pod:") {
                 process.arg("--pod").arg(pod_name);
             } else {
