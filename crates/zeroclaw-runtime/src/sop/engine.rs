@@ -10165,7 +10165,11 @@ mod tests {
             "only the failed first park still holds an exec claim"
         );
 
-        engine.config.approval_timeout_secs = 1;
+        // Use a large timeout so the second run (parked at whole-second
+        // `waiting_since`) cannot become overdue if the wall clock crosses a
+        // second boundary between park and this tick. The first run is still a
+        // timeout candidate because its waiting_since is back-dated below.
+        engine.config.approval_timeout_secs = 3600;
         engine.active_runs.get_mut(&first_id).unwrap().waiting_since =
             Some("2000-01-01T00:00:00Z".to_string());
         let summary = engine.run_maintenance_tick();

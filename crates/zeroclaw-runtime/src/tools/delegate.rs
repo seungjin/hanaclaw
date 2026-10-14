@@ -394,6 +394,11 @@ enum DelegateAdmission {
     Prevalidated,
 }
 
+struct DelegateApprovalContext<'a> {
+    target_config: Option<&'a Config>,
+    registry: &'a (dyn Fn(&Config) -> Option<crate::tools::PerToolChannelHandle> + Send + Sync),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DelegateAction {
     Delegate,
@@ -1143,6 +1148,25 @@ impl DelegateTool {
             .unwrap_or(DelegateExecutionMode::Bounded)
     }
 
+    // A target-owned route is the only approval authority forwarded into an
+    // independent child. In particular, no parent channel or session grant is
+    // inherited, and bounded children keep their separate policy contract.
+    fn independent_approval_route(
+        mode: DelegateExecutionMode,
+        profile: &RiskProfileConfig,
+    ) -> Option<&zeroclaw_config::autonomy::ApprovalRoute> {
+        if mode != DelegateExecutionMode::Independent {
+            return None;
+        }
+        profile.approval_route.as_ref().filter(|route| {
+            !route.approver_channel.trim().is_empty()
+                && route
+                    .approver_recipient
+                    .as_deref()
+                    .is_some_and(|recipient| !recipient.trim().is_empty())
+        })
+    }
+
     fn unsupported_agentic_always_ask_refusal_from_config(
         &self,
         config: &Config,
@@ -1150,10 +1174,9 @@ impl DelegateTool {
     ) -> Option<ToolResult> {
         let target_mode = config.delegate_target_mode(&self.caller_alias, target_alias)?;
         let target_agent = config.agents.get(target_alias)?;
-        // Independent targets have no approval backchannel at all. Bounded
-        // one-shot targets do not execute tools, so `always_ask` is irrelevant;
-        // bounded agentic loops must fail closed until approval forwarding is
-        // implemented.
+        // Bounded one-shot targets do not execute tools. Bounded agentic
+        // targets still have no approval route; independent targets may opt
+        // into their own explicitly configured operator route.
         if target_mode == DelegateExecutionMode::Bounded {
             let target_is_agentic = config
                 .runtime_profile_for_agent(target_alias)
@@ -1169,6 +1192,9 @@ impl DelegateTool {
         }
 
         let profile = config.risk_profiles.get(target_risk_profile)?;
+        if Self::independent_approval_route(target_mode, profile).is_some() {
+            return None;
+        }
         let always_ask_entries: Vec<String> = profile
             .always_ask
             .iter()
@@ -2924,6 +2950,7 @@ impl DelegateTool {
             agent_config,
             &model,
             &[],
+            None,
             prompt_workspace,
             false,
             None,
@@ -4490,6 +4517,7 @@ impl DelegateTool {
             agent_config,
             model_name,
             sub_tools,
+            None,
             workspace_dir,
             sends_native_tool_specs,
             skills_override,
@@ -4497,6 +4525,7 @@ impl DelegateTool {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_enriched_system_prompt_from_config(
         &self,
         config: Option<&Config>,
@@ -4504,6 +4533,7 @@ impl DelegateTool {
         agent_config: &AliasedAgentConfig,
         model_name: &str,
         sub_tools: &[Box<dyn Tool>],
+        hidden_builtin_names: Option<&HashSet<String>>,
         workspace_dir: &Path,
         sends_native_tool_specs: bool,
         skills_override: Option<&[crate::skills::Skill]>,
@@ -4570,6 +4600,7 @@ impl DelegateTool {
             agent_workspace_dir: workspace_dir,
             model_name,
             tools: prompt_tools,
+            hidden_builtin_names,
             skills,
             skills_prompt_mode: agent_config.resolved.prompt_injection_mode,
             identity_config: None,
@@ -4663,6 +4694,39 @@ impl DelegateTool {
         admission: DelegateAdmission,
         target_config: Option<&Config>,
     ) -> anyhow::Result<ToolResult> {
+        self.execute_agentic_with_approval_registry(
+            agent_name,
+            agent_config,
+            provider_type,
+            model,
+            model_provider,
+            full_prompt,
+            temperature,
+            admission,
+            DelegateApprovalContext {
+                target_config,
+                registry: &crate::agent::loop_::live_approval_channel_registry,
+            },
+        )
+        .await
+    }
+
+    async fn execute_agentic_with_approval_registry(
+        &self,
+        agent_name: &str,
+        agent_config: &AliasedAgentConfig,
+        provider_type: &str,
+        model: &str,
+        model_provider: &dyn ModelProvider,
+        full_prompt: &str,
+        temperature: Option<f64>,
+        admission: DelegateAdmission,
+        approval_context: DelegateApprovalContext<'_>,
+    ) -> anyhow::Result<ToolResult> {
+        let DelegateApprovalContext {
+            target_config,
+            registry: approval_registry,
+        } = approval_context;
         let Some(tool_policy) =
             self.resolve_tool_policy_from_config(target_config, &agent_config.risk_profile)
         else {
@@ -4695,12 +4759,10 @@ impl DelegateTool {
         let target_mode = target_config
             .map(|config| self.mode_for_target_from_config(config, agent_name))
             .unwrap_or_else(|| self.mode_for_target(agent_name));
-        // Every delegated agentic turn is non-interactive: there is no operator
-        // route inside the child loop. Resolve the target's canonical profile
-        // before entering the loop and create a fresh manager so prompt-required
-        // non-delegate tools fail closed before dispatch while explicitly
-        // auto-approved tools still run. Use the admitted config generation
-        // when present; the configless test builder supplies named profiles.
+        // Resolve one admitted target generation and create a fresh approval
+        // manager for this child. A complete independent target route may ask
+        // its configured operator; other children stay non-interactive and
+        // fail closed. No parent approval grants cross this boundary.
         let target_risk_profile = match target_config.or(self.root_config.as_deref()) {
             Some(config) => config.risk_profile_for_agent(agent_name),
             None => self.risk_profiles.get(agent_config.risk_profile.trim()),
@@ -4715,9 +4777,21 @@ impl DelegateTool {
                 )),
             });
         };
+        let approval_route = Self::independent_approval_route(target_mode, target_risk_profile);
+        let approval_channel = approval_route.and_then(|route| {
+            target_config
+                .or(self.root_config.as_deref())
+                .and_then(approval_registry)
+                .map(|handles| {
+                    crate::agent::agent::RoutedApprovalChannel::new(handles, route.clone())
+                })
+        });
         let approval_manager = Some(match target_mode {
             DelegateExecutionMode::Bounded => {
                 ApprovalManager::for_bounded_non_interactive(target_risk_profile)
+            }
+            DelegateExecutionMode::Independent if approval_route.is_some() => {
+                ApprovalManager::for_non_interactive_backchannel(target_risk_profile)
             }
             DelegateExecutionMode::Independent => {
                 ApprovalManager::for_non_interactive(target_risk_profile)
@@ -5011,12 +5085,26 @@ impl DelegateTool {
         // the skill prompt content matches the target's skill tools; bounded delegation
         // keeps the caller's `self.workspace_dir`.
         let prompt_workspace = sub_workspace.as_deref().unwrap_or(&self.workspace_dir);
+        let hidden_builtin_names = sub_tools.hidden_builtin_names();
+        if let Some(state) = &sub_activated {
+            let section = state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .deferred_builtin_prompt_section();
+            if !section.is_empty() {
+                if !sub_deferred_section.is_empty() {
+                    sub_deferred_section.push_str("\n\n");
+                }
+                sub_deferred_section.push_str(&section);
+            }
+        }
         let enriched_system_prompt = self.build_enriched_system_prompt_from_config(
             target_config,
             agent_name,
             agent_config,
             model,
             &sub_tools,
+            Some(&hidden_builtin_names),
             prompt_workspace,
             native_tools,
             sub_skills.as_deref(),
@@ -5167,7 +5255,9 @@ impl DelegateTool {
                 cancellation_token: Some(self.turn_bound_child_token()),
                 on_delta: None,
                 shared_budget: execution_tree_budget.clone(),
-                channel: None,
+                channel: approval_channel
+                    .as_ref()
+                    .map(|channel| channel as &dyn zeroclaw_api::channel::Channel),
                 collected_receipts,
                 event_tx: None,
                 steering: None,
@@ -5178,7 +5268,8 @@ impl DelegateTool {
                 memory: None,
                 ingress: zeroclaw_api::ingress::IngressContext::sub_turn(),
                 agent_alias: Some(agent_name),
-                parent_agent_alias: None,
+                parent_agent_alias: (target_mode == DelegateExecutionMode::Independent)
+                    .then_some(self.caller_alias.as_str()),
                 turn_id: &turn_id,
             })
             .instrument(::zeroclaw_log::attribution_span!(
@@ -16643,6 +16734,8 @@ command = "echo hi"
     struct FullTargetProbeProvider {
         system_prompts: std::sync::Mutex<Vec<String>>,
         tool_messages: std::sync::Mutex<Vec<String>>,
+        native_tools: bool,
+        request_tool_names: std::sync::Mutex<Vec<Vec<String>>>,
     }
 
     #[cfg(unix)]
@@ -16664,6 +16757,10 @@ command = "echo hi"
     #[cfg(unix)]
     #[async_trait]
     impl ModelProvider for FullTargetProbeProvider {
+        fn supports_native_tools(&self) -> bool {
+            self.native_tools
+        }
+
         async fn chat_with_system(
             &self,
             _system_prompt: Option<&str>,
@@ -16690,6 +16787,14 @@ command = "echo hi"
                     .unwrap()
                     .push(system.content.clone());
             }
+            self.request_tool_names.lock().unwrap().push(
+                request
+                    .tools
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|spec| spec.name.clone())
+                    .collect(),
+            );
             let tool_messages: Vec<String> = request
                 .messages
                 .iter()
@@ -16768,7 +16873,11 @@ command = "echo hi"
             "target".to_string(),
             RiskProfileConfig {
                 level: zeroclaw_config::autonomy::AutonomyLevel::Full,
-                allowed_tools: vec!["shell".to_string()],
+                allowed_tools: vec![
+                    "shell".to_string(),
+                    "memory_forget".to_string(),
+                    "tool_search".to_string(),
+                ],
                 ..RiskProfileConfig::default()
             },
         );
@@ -16777,6 +16886,8 @@ command = "echo hi"
             RuntimeProfileConfig {
                 agentic: true,
                 max_tool_iterations: 2,
+                deferred_builtin_tools: true,
+                strict_tool_parsing: false,
                 ..RuntimeProfileConfig::default()
             },
         );
@@ -16817,63 +16928,88 @@ command = "echo hi"
             .with_runtime_profiles(config.runtime_profiles.clone())
             .with_parent_tools(Arc::new(RwLock::new(Vec::new())));
         let target = config.agents.get("target").unwrap();
-        let provider = FullTargetProbeProvider::default();
+        for native_tools in [false, true] {
+            let provider = FullTargetProbeProvider {
+                native_tools,
+                ..Default::default()
+            };
 
-        let result = delegate
-            .execute_agentic(
-                "target",
-                target,
-                "test",
-                "test-model",
-                &provider,
-                "echo the marker phrase",
-                None,
-            )
-            .await
-            .unwrap();
+            let result = delegate
+                .execute_agentic(
+                    "target",
+                    target,
+                    "test",
+                    "test-model",
+                    &provider,
+                    "echo the marker phrase",
+                    None,
+                )
+                .await
+                .unwrap();
 
-        assert!(
-            result.success,
-            "independent Full target must complete: {result:?}"
-        );
+            assert!(
+                result.success,
+                "independent Full target must complete: {result:?}"
+            );
 
-        // Prompt side: the enriched prompt states the target manager's exact
-        // Full + empty-always_ask contract, not generic Supervised guidance.
-        let prompt = provider.system_prompt();
-        assert!(
-            prompt
-                .contains("Full autonomy auto-approves tools that are not listed in `always_ask`"),
-            "Full target prompt must state the Full contract, got: {prompt}"
-        );
-        assert!(
-            prompt.contains("No tools are listed in `always_ask`"),
-            "Full target with no always_ask must see the empty-list contract, got: {prompt}"
-        );
-        assert!(
-            !prompt.contains("Ask for approval when the runtime policy requires it"),
-            "Full target must not receive generic Supervised guidance, got: {prompt}"
-        );
+            // Prompt side: the enriched prompt states the target manager's exact
+            // Full + empty-always_ask contract, not generic Supervised guidance.
+            let prompt = provider.system_prompt();
+            assert!(
+                prompt.contains("memory_forget - "),
+                "target must discover its deferred built-in: {prompt}"
+            );
+            assert!(
+                !prompt.contains("**memory_forget**"),
+                "text prompts must omit the deferred definition: {prompt}"
+            );
+            assert!(
+                !prompt.contains("delegate - "),
+                "removed recursion must not enter discovery"
+            );
+            if native_tools {
+                let requests = provider.request_tool_names.lock().unwrap();
+                assert!(requests[0].iter().any(|name| name == "tool_search"));
+                assert!(requests[0].iter().any(|name| name == "shell"));
+                assert!(!requests[0].iter().any(|name| name == "memory_forget"));
+            }
+            assert!(
+                prompt.contains(
+                    "Full autonomy auto-approves tools that are not listed in `always_ask`"
+                ),
+                "Full target prompt must state the Full contract, got: {prompt}"
+            );
+            assert!(
+                prompt.contains("No tools are listed in `always_ask`"),
+                "Full target with no always_ask must see the empty-list contract, got: {prompt}"
+            );
+            assert!(
+                !prompt.contains("Ask for approval when the runtime policy requires it"),
+                "Full target must not receive generic Supervised guidance, got: {prompt}"
+            );
 
-        // Enforcement side: the uncovered tool executed directly — the tool
-        // result carries the real command output, not an approval denial.
-        let tool_messages = provider.tool_messages();
-        assert!(
-            tool_messages
-                .iter()
-                .any(|message| message.contains("delegate-full-ran")),
-            "uncovered Full tool must execute and report real output: {tool_messages:?}"
-        );
-        assert!(
-            !tool_messages
-                .iter()
-                .any(|message| message.contains("requires approval")),
-            "uncovered Full tool must not be gated: {tool_messages:?}"
-        );
+            // Enforcement side: the uncovered tool executed directly — the tool
+            // result carries the real command output, not an approval denial.
+            let tool_messages = provider.tool_messages();
+            assert!(
+                tool_messages
+                    .iter()
+                    .any(|message| message.contains("delegate-full-ran")),
+                "uncovered Full tool must execute and report real output: {tool_messages:?}"
+            );
+            assert!(
+                !tool_messages
+                    .iter()
+                    .any(|message| message.contains("requires approval")),
+                "uncovered Full tool must not be gated: {tool_messages:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn independent_delegate_denies_prompt_required_skill_tools_without_approval_route() {
+    fn independent_approval_fixture(
+        profile: Option<RiskProfileConfig>,
+    ) -> (TempDir, PathBuf, Arc<Config>, DelegateTool) {
         use zeroclaw_config::autonomy::{DelegationMode, DelegationPolicy};
         use zeroclaw_config::schema::{
             AliasedAgentConfig, Config, RiskProfileConfig, RuntimeProfileConfig,
@@ -16916,14 +17052,14 @@ command = "rm independent-delegate-marker"
         );
         config.risk_profiles.insert(
             "target".to_string(),
-            RiskProfileConfig {
+            profile.unwrap_or(RiskProfileConfig {
                 level: AutonomyLevel::Supervised,
                 allowed_commands: vec!["rm".to_string()],
                 allowed_tools: vec!["shell".to_string()],
                 block_high_risk_commands: true,
                 require_approval_for_medium_risk: true,
                 ..RiskProfileConfig::default()
-            },
+            }),
         );
         config.runtime_profiles.insert(
             "agentic".to_string(),
@@ -16969,6 +17105,13 @@ command = "rm independent-delegate-marker"
             .with_risk_profiles(config.risk_profiles.clone())
             .with_runtime_profiles(config.runtime_profiles.clone())
             .with_parent_tools(Arc::new(RwLock::new(Vec::new())));
+        (tmp, marker, config, delegate)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_delegate_denies_prompt_required_skill_tools_without_approval_route() {
+        let (_tmp, marker, config, delegate) = independent_approval_fixture(None);
         let target = config.agents.get("target").unwrap();
         let provider = IndependentRiskPolicyModelProvider::default();
 
@@ -17006,6 +17149,345 @@ command = "rm independent-delegate-marker"
             }),
             "built-in shell must still receive approved=false and enforce command policy: {tool_messages:?}"
         );
+    }
+
+    #[cfg(unix)]
+    struct DelegateApprovalProbeChannel {
+        responses: std::sync::Mutex<
+            std::collections::VecDeque<Option<zeroclaw_api::channel::ChannelApprovalResponse>>,
+        >,
+        requests: std::sync::Mutex<Vec<(String, zeroclaw_api::channel::ChannelApprovalRequest)>>,
+    }
+
+    #[cfg(unix)]
+    impl ::zeroclaw_api::attribution::Attributable for DelegateApprovalProbeChannel {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Channel(
+                ::zeroclaw_api::attribution::ChannelKind::Cli,
+            )
+        }
+        fn alias(&self) -> &str {
+            "approval-probe"
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl zeroclaw_api::channel::Channel for DelegateApprovalProbeChannel {
+        fn name(&self) -> &str {
+            "approval-probe"
+        }
+        async fn send(&self, _: &zeroclaw_api::channel::SendMessage) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn listen(
+            &self,
+            _: tokio::sync::mpsc::Sender<zeroclaw_api::channel::ChannelMessage>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn request_approval(
+            &self,
+            recipient: &str,
+            request: &zeroclaw_api::channel::ChannelApprovalRequest,
+        ) -> anyhow::Result<Option<zeroclaw_api::channel::ChannelApprovalResponse>> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((recipient.into(), request.clone()));
+            Ok(self.responses.lock().unwrap().pop_front().flatten())
+        }
+    }
+
+    #[cfg(unix)]
+    fn delegate_approval_profile(always_ask: bool) -> RiskProfileConfig {
+        RiskProfileConfig {
+            level: AutonomyLevel::Supervised,
+            allowed_commands: vec!["rm".into()],
+            allowed_tools: vec!["shell".into()],
+            always_ask: if always_ask {
+                vec!["shell".into()]
+            } else {
+                Vec::new()
+            },
+            approval_route: Some(zeroclaw_config::autonomy::ApprovalRoute {
+                approver_channel: "ops".into(),
+                approver_recipient: Some("operator".into()),
+                timeout_secs: 1,
+                ..Default::default()
+            }),
+            ..RiskProfileConfig::default()
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_delegate_approval_route_gates_real_shell_and_scopes_grants() {
+        use zeroclaw_api::channel::ChannelApprovalResponse;
+        // A supervised shell must ask through its target's route. Always from
+        // the first child must not approve the next child automatically.
+        let (_tmp, marker, config, delegate) =
+            independent_approval_fixture(Some(delegate_approval_profile(false)));
+        let channel = Arc::new(DelegateApprovalProbeChannel {
+            responses: std::sync::Mutex::new(std::collections::VecDeque::from([
+                Some(ChannelApprovalResponse::AlwaysApprove),
+                Some(ChannelApprovalResponse::Deny),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let handles = Arc::new(RwLock::new(HashMap::from([(
+            "ops".into(),
+            Arc::clone(&channel) as Arc<dyn zeroclaw_api::channel::Channel>,
+        )])));
+        for approved in [true, false] {
+            std::fs::write(&marker, b"must survive denial").unwrap();
+            let provider = ApprovalProbeModelProvider {
+                tool_name: "shell",
+                tool_arguments: json!({
+                    "command": "rm independent-delegate-marker",
+                    "approved": true,
+                })
+                .to_string(),
+                tool_messages: std::sync::Mutex::new(Vec::new()),
+            };
+            let result = delegate
+                .execute_agentic_with_approval_registry(
+                    "target",
+                    &config.agents["target"],
+                    "test",
+                    "test-model",
+                    &provider,
+                    "remove the marker",
+                    None,
+                    DelegateAdmission::Required,
+                    DelegateApprovalContext {
+                        target_config: Some(&config),
+                        registry: &|_| Some(Arc::clone(&handles)),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(result.success, "{result:?}");
+            assert_eq!(
+                marker.exists(),
+                !approved,
+                "approval must control the actual command"
+            );
+            if !approved {
+                assert!(
+                    provider
+                        .tool_messages
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|message| message.contains("Denied by user"))
+                );
+            }
+        }
+        let requests = channel.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "Always must stay within the first child run"
+        );
+        for (recipient, request) in requests.iter() {
+            assert_eq!(recipient, "operator");
+            assert_eq!(request.tool_name, "shell");
+            assert!(
+                request
+                    .arguments_summary
+                    .starts_with("Independent delegate \"target\" from \"caller\"\n")
+            );
+            assert_eq!(
+                request.raw_arguments.as_ref().unwrap()["approved"],
+                false,
+                "model-supplied approval must be cleared before asking the operator"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_delegate_always_ask_route_dispatches_only_with_operator_approval() {
+        use zeroclaw_api::channel::ChannelApprovalResponse;
+        // Foreground and parallel workers use normal admission; detached
+        // background workers use the prevalidated path.
+        for admission in [DelegateAdmission::Required, DelegateAdmission::Prevalidated] {
+            for response in [Some(ChannelApprovalResponse::Approve), None] {
+                let approved = response.is_some();
+                let (_tmp, marker, config, mut delegate) =
+                    independent_approval_fixture(Some(delegate_approval_profile(true)));
+                assert!(
+                    delegate
+                        .unsupported_agentic_always_ask_refusal_from_config(&config, "target")
+                        .is_none()
+                );
+                if admission == DelegateAdmission::Prevalidated {
+                    delegate.security =
+                        Arc::new(SecurityPolicy::for_agent(&config, "target").unwrap());
+                }
+                let channel = Arc::new(DelegateApprovalProbeChannel {
+                    responses: std::sync::Mutex::new(std::collections::VecDeque::from([response])),
+                    requests: std::sync::Mutex::new(Vec::new()),
+                });
+                let handles = Arc::new(RwLock::new(HashMap::from([(
+                    "ops".into(),
+                    channel as Arc<dyn zeroclaw_api::channel::Channel>,
+                )])));
+                let provider = ApprovalProbeModelProvider {
+                    tool_name: "shell",
+                    tool_arguments:
+                        json!({"command": "rm independent-delegate-marker", "approved": true})
+                            .to_string(),
+                    tool_messages: std::sync::Mutex::new(Vec::new()),
+                };
+                let result = delegate
+                    .execute_agentic_with_approval_registry(
+                        "target",
+                        &config.agents["target"],
+                        "test",
+                        "test-model",
+                        &provider,
+                        "remove the marker",
+                        None,
+                        admission,
+                        DelegateApprovalContext {
+                            target_config: Some(&config),
+                            registry: &|_| Some(Arc::clone(&handles)),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(result.success, "{result:?}");
+                assert_eq!(marker.exists(), !approved);
+                if !approved {
+                    assert!(
+                        provider
+                            .tool_messages
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|message| message.contains("no operator decision was available"))
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_delegate_configured_route_without_registry_controls_shell_execution() {
+        // A configured route is authoritative even in a channel-less process.
+        // Compare actual shell output with no route and explicit policy grants.
+        for (route, full, auto_approve, always_ask, executes) in [
+            (false, false, false, false, true),
+            (true, false, false, false, false),
+            (true, false, true, false, true),
+            (true, true, false, false, true),
+            (true, true, false, true, false),
+        ] {
+            let mut profile = delegate_approval_profile(always_ask);
+            profile.allowed_commands = vec!["cat".into()];
+            if !route {
+                profile.approval_route = None;
+            }
+            if full {
+                profile.level = AutonomyLevel::Full;
+            }
+            if auto_approve {
+                profile.auto_approve = vec!["shell".into()];
+            }
+            let (_tmp, marker, config, delegate) = independent_approval_fixture(Some(profile));
+            std::fs::write(&marker, b"registry-none-control-marker").unwrap();
+            let provider = ApprovalProbeModelProvider {
+                tool_name: "shell",
+                tool_arguments:
+                    json!({"command": "cat independent-delegate-marker", "approved": true})
+                        .to_string(),
+                tool_messages: std::sync::Mutex::new(Vec::new()),
+            };
+            let result = delegate
+                .execute_agentic_with_approval_registry(
+                    "target",
+                    &config.agents["target"],
+                    "test",
+                    "test-model",
+                    &provider,
+                    "read the marker",
+                    None,
+                    DelegateAdmission::Required,
+                    DelegateApprovalContext {
+                        target_config: Some(&config),
+                        registry: &|_| None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(result.success, "{result:?}");
+            let messages = provider.tool_messages.lock().unwrap();
+            assert_eq!(
+                messages
+                    .iter()
+                    .any(|message| message.contains("registry-none-control-marker")),
+                executes,
+                "route={route}, full={full}, auto_approve={auto_approve}, always_ask={always_ask}: {messages:?}"
+            );
+            if !executes {
+                assert!(
+                    messages
+                        .iter()
+                        .any(|message| { message.contains("no operator decision was available") })
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_delegate_approval_route_missing_channel_never_inherits_originator() {
+        for inherit in [false, true] {
+            let mut profile = delegate_approval_profile(true);
+            if inherit {
+                profile.approval_route.as_mut().unwrap().on_no_approver =
+                    zeroclaw_config::autonomy::OnNoApprover::InheritOriginator;
+            }
+            let (_tmp, marker, config, delegate) = independent_approval_fixture(Some(profile));
+            let provider = ApprovalProbeModelProvider {
+                tool_name: "shell",
+                tool_arguments:
+                    json!({"command": "rm independent-delegate-marker", "approved": true})
+                        .to_string(),
+                tool_messages: std::sync::Mutex::new(Vec::new()),
+            };
+            let handles = Arc::new(RwLock::new(HashMap::new()));
+            let result = delegate
+                .execute_agentic_with_approval_registry(
+                    "target",
+                    &config.agents["target"],
+                    "test",
+                    "test-model",
+                    &provider,
+                    "remove the marker",
+                    None,
+                    DelegateAdmission::Required,
+                    DelegateApprovalContext {
+                        target_config: Some(&config),
+                        registry: &|_| Some(Arc::clone(&handles)),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(result.success, "{result:?}");
+            assert!(marker.exists());
+            assert!(
+                provider
+                    .tool_messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|message| message.contains("no operator decision was available"))
+            );
+        }
     }
 
     // Finding: an independent delegate to a non-native, strict-tool-parsing target must
