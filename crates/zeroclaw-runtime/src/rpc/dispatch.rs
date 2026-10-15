@@ -17634,9 +17634,13 @@ mod tests {
         assert_eq!(result["size_bytes"], json!(payload.len()), "{committed}");
         assert_eq!(result["deduplicated"], json!(false), "{committed}");
         let stored = std::path::PathBuf::from(result["workspace_path"].as_str().unwrap());
+        // Compare resolved paths: the reply carries the canonical path without
+        // the Windows verbatim prefix, while the fixture's temp root can be
+        // spelled through a symlink or an 8.3 short name.
         assert!(
-            stored.starts_with(std::fs::canonicalize(&agent_workspace).unwrap())
-                || stored.starts_with(&agent_workspace),
+            std::fs::canonicalize(&stored)
+                .unwrap()
+                .starts_with(std::fs::canonicalize(&agent_workspace).unwrap()),
             "the upload lands in the agent workspace: {committed}"
         );
         assert_eq!(std::fs::read(&stored).unwrap(), payload);
@@ -44918,7 +44922,14 @@ mod tests {
                     zeroclaw_api::grants::Verb::Execute,
                 ],
             );
-        let workspace = config.agent_workspace_dir("test-agent");
+        // A live session holds the resolved workspace, as `session/new` and
+        // rehydration store it; the raw temp-dir spelling can be an alias
+        // (`/var` on macOS, an 8.3 short name on Windows), which a scoped
+        // steer refuses.
+        let workspace = config
+            .agent_workspace_dir("test-agent")
+            .canonicalize()
+            .unwrap();
         let (ctx, chat_backend, _acp_store) = persistence_enforcement_ctx(config);
         let (provider, _handles) = scripted_turn_provider();
         install_state_test_session_owned_at(
