@@ -15016,6 +15016,10 @@ pub struct DockerRuntimeConfig {
     #[serde(default = "default_true")]
     pub mount_workspace: bool,
 
+    /// Use Podman as the container runtime launcher instead of Docker.
+    #[serde(default)]
+    pub is_podman: bool,
+
     /// Optional workspace root allowlist for fail-closed Docker mount validation: when `mount_workspace` is enabled, the workspace must exist and canonicalize even when this list is empty; every configured root must also exist and canonicalize; one invalid entry rejects the command before Docker starts; an empty list permits any canonical workspace.
     #[serde(default)]
     pub allowed_workspace_roots: Vec<String>,
@@ -15047,6 +15051,7 @@ impl Default for DockerRuntimeConfig {
             read_only_rootfs: true,
             mount_workspace: true,
             allowed_workspace_roots: Vec::new(),
+            is_podman: false,
         }
     }
 }

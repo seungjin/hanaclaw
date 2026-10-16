@@ -50,6 +50,14 @@ impl DockerRuntime {
         }
     }
 
+    fn launcher_name(&self) -> &'static OsStr {
+        if self.config.is_podman {
+            OsStr::new("podman")
+        } else {
+            OsStr::new("docker")
+        }
+    }
+
     fn workspace_mount_path(&self, workspace_dir: &Path) -> Result<PathBuf> {
         let resolved = workspace_dir.canonicalize().map_err(|source| {
             DockerWorkspaceMountError::WorkspacePath {
@@ -120,25 +128,26 @@ impl DockerRuntime {
         env_keys: &[&OsStr],
     ) -> anyhow::Result<tokio::process::Command> {
         let host_workspace = self.validated_workspace_mount(workspace_dir)?;
+        let launcher_name = self.launcher_name();
 
         #[cfg(unix)]
-        let docker = if let Some(resolved_launcher) = &self.resolved_launcher {
+        let launcher = if let Some(resolved_launcher) = &self.resolved_launcher {
             resolved_launcher.clone()
         } else {
-            crate::platform::resolve_executable(OsStr::new("docker")).map_err(|error| {
+            crate::platform::resolve_executable(launcher_name).map_err(|error| {
                 anyhow::Error::new(error).context(
                     "Docker runtime launcher could not be resolved before command construction",
                 )
             })?
         };
         #[cfg(not(unix))]
-        let docker = PathBuf::from("docker");
+        let launcher = PathBuf::from(launcher_name);
 
         self.build_shell_command_with_launcher(
             command,
             host_workspace.as_deref(),
             env_keys,
-            &docker,
+            &launcher,
         )
     }
 
@@ -158,7 +167,11 @@ impl DockerRuntime {
 
         let network = self.config.network.trim();
         if !network.is_empty() {
-            process.arg("--network").arg(network);
+            if let Some(pod_name) = network.strip_prefix("pod:") {
+                process.arg("--pod").arg(pod_name);
+            } else {
+                process.arg("--network").arg(network);
+            }
         }
 
         if let Some(memory_limit_mb) = self.config.memory_limit_mb.filter(|mb| *mb > 0) {
@@ -239,7 +252,11 @@ fn docker_env_key(key: &OsStr) -> Result<&str> {
 
 impl RuntimeAdapter for DockerRuntime {
     fn name(&self) -> &str {
-        "docker"
+        if self.config.is_podman {
+            "podman"
+        } else {
+            "docker"
+        }
     }
 
     fn has_filesystem_access(&self) -> bool {
@@ -294,8 +311,9 @@ impl RuntimeAdapter for DockerRuntime {
         #[cfg(unix)]
         if let Some(path) = effective_path {
             let host_workspace = self.validated_workspace_mount(workspace_dir)?;
+            let launcher_name = self.launcher_name();
             let resolved_launcher = crate::platform::resolve_executable_with_path(
-                OsStr::new("docker"),
+                launcher_name,
                 std::env::split_paths(path),
             )
             .map_err(|error| {
@@ -326,6 +344,15 @@ mod tests {
     fn docker_runtime_name() {
         let runtime = DockerRuntime::new(DockerRuntimeConfig::default());
         assert_eq!(runtime.name(), "docker");
+    }
+
+    #[test]
+    fn docker_runtime_name_podman() {
+        let runtime = DockerRuntime::new(DockerRuntimeConfig {
+            is_podman: true,
+            ..Default::default()
+        });
+        assert_eq!(runtime.name(), "podman");
     }
 
     #[test]

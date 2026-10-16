@@ -54,9 +54,15 @@ pub fn create_runtime_with_path(
         }
         RuntimeKind::Docker => {
             #[cfg(unix)]
+            let launcher_name = if config.docker.is_podman {
+                OsStr::new("podman")
+            } else {
+                OsStr::new("docker")
+            };
+            #[cfg(unix)]
             let docker_path = path
                 .map(|path| {
-                    resolve_executable_with_path(OsStr::new("docker"), std::env::split_paths(path))
+                    resolve_executable_with_path(launcher_name, std::env::split_paths(path))
                         .map_err(|error| {
                             anyhow::Error::new(error).context(
                             "Docker runtime launcher could not be resolved in the injected PATH",
@@ -210,6 +216,37 @@ mod tests {
             docker_command.as_std().get_program(),
             docker.canonicalize().unwrap().as_os_str()
         );
+    #[cfg(unix)]
+    #[test]
+    fn factory_resolves_podman_when_is_podman_true() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let podman = dir.path().join("podman");
+        std::fs::write(&podman, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&podman, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let docker_runtime = create_runtime_with_path(
+            &RuntimeConfig {
+                kind: RuntimeKind::Docker,
+                docker: crate::schema::DockerRuntimeConfig {
+                    is_podman: true,
+                    ..Default::default()
+                },
+                ..RuntimeConfig::default()
+            },
+            Some(dir.path().as_os_str()),
+        )
+        .unwrap();
+        let docker_command = docker_runtime
+            .build_shell_command("echo podman", &std::env::temp_dir())
+            .unwrap();
+        assert_eq!(
+            docker_command.as_std().get_program(),
+            podman.canonicalize().unwrap().as_os_str()
+        );
+    }
+
     }
 
     #[test]
