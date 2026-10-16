@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use zeroclaw_api::runtime_traits::{RuntimeAdapter, ShellDialect};
+use zeroclaw_log::{Action, Event, record};
 
 /// Canonicalization failures that the runtime layer can present through
 /// localized tool diagnostics without parsing an English error chain.
@@ -205,6 +206,18 @@ impl DockerRuntime {
             .arg("-c")
             .arg(command);
 
+        record!(
+            DEBUG,
+            Event::new(module_path!(), Action::Note)
+                .with_attrs(serde_json::json!({
+                    "launcher": docker.display().to_string(),
+                    "args": process.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                    "image": self.config.image.trim(),
+                    "command": command,
+                })),
+            "built docker runtime command"
+        );
+
         Ok(process)
     }
 
@@ -374,6 +387,7 @@ mod tests {
     #[test]
     fn docker_build_shell_command_includes_runtime_flags() {
         let cfg = DockerRuntimeConfig {
+            is_podman: false,
             image: "alpine:3.20".into(),
             network: "none".into(),
             memory_limit_mb: Some(128),
