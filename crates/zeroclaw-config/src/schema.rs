@@ -15085,9 +15085,19 @@ pub struct DockerRuntimeConfig {
     #[serde(default = "default_true")]
     pub mount_workspace: bool,
 
-    /// Use Podman as the container runtime launcher instead of Docker.
+    /// Use the Podman launcher instead of the Docker launcher.
     #[serde(default)]
-    pub is_podman: bool,
+    pub podman: bool,
+
+    /// Pass `--remote` to the container launcher so it talks to a remote Podman
+    /// daemon (`podman system service`).
+    #[serde(default)]
+    pub podman_remote: bool,
+
+    /// Optional Podman pod name. When set together with `podman_remote`, the
+    /// command runs with `--pod <name>`. An empty value is ignored.
+    #[serde(default)]
+    pub pod: Option<String>,
 
     /// Optional workspace root allowlist for fail-closed Docker mount validation: when `mount_workspace` is enabled, the workspace must exist and canonicalize even when this list is empty; every configured root must also exist and canonicalize; one invalid entry rejects the command before Docker starts; an empty list permits any canonical workspace.
     #[serde(default)]
@@ -15120,7 +15130,9 @@ impl Default for DockerRuntimeConfig {
             read_only_rootfs: true,
             mount_workspace: true,
             allowed_workspace_roots: Vec::new(),
-            is_podman: false,
+            podman: false,
+            podman_remote: false,
+            pod: None,
         }
     }
 }

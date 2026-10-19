@@ -54,7 +54,7 @@ pub fn create_runtime_with_path(
         }
         RuntimeKind::Docker => {
             #[cfg(unix)]
-            let launcher_name = if config.docker.is_podman {
+            let launcher_name = if config.docker.podman {
                 OsStr::new("podman")
             } else {
                 OsStr::new("docker")
@@ -216,9 +216,11 @@ mod tests {
             docker_command.as_std().get_program(),
             docker.canonicalize().unwrap().as_os_str()
         );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn factory_resolves_podman_when_is_podman_true() {
+    fn factory_resolves_podman_when_podman_true() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -230,7 +232,7 @@ mod tests {
             &RuntimeConfig {
                 kind: RuntimeKind::Docker,
                 docker: crate::schema::DockerRuntimeConfig {
-                    is_podman: true,
+                    podman: true,
                     ..Default::default()
                 },
                 ..RuntimeConfig::default()
@@ -245,8 +247,6 @@ mod tests {
             docker_command.as_std().get_program(),
             podman.canonicalize().unwrap().as_os_str()
         );
-    }
-
     }
 
     #[test]
