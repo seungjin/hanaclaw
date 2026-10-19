@@ -3,4 +3,3 @@ alias c := container
 
 container build:
     podman build -f Containerfile.hanaclaw --build-arg ZEROCLAW_BUILD_ID=$(git describe --always --dirty --dirty="-dirty") -t ghcr.io/seungjin/hanaclaw:latest ../
->
