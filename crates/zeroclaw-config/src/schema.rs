@@ -15099,6 +15099,12 @@ pub struct DockerRuntimeConfig {
     #[serde(default)]
     pub pod: Option<String>,
 
+    /// Optional Podman storage volume mounted at `/workspace` instead of the
+    /// host workspace directory. When set, the volume is mounted with the
+    /// `:rw,z` relabeling suffix.
+    #[serde(default)]
+    pub podman_storage: Option<String>,
+
     /// Optional workspace root allowlist for fail-closed Docker mount validation: when `mount_workspace` is enabled, the workspace must exist and canonicalize even when this list is empty; every configured root must also exist and canonicalize; one invalid entry rejects the command before Docker starts; an empty list permits any canonical workspace.
     #[serde(default)]
     pub allowed_workspace_roots: Vec<String>,
@@ -15133,6 +15139,7 @@ impl Default for DockerRuntimeConfig {
             podman: false,
             podman_remote: false,
             pod: None,
+            podman_storage: None,
         }
     }
 }

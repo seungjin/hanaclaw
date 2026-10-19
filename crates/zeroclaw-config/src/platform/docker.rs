@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use zeroclaw_api::runtime_traits::{RuntimeAdapter, ShellDialect};
-use zeroclaw_log::{Action, Event, record};
+use zeroclaw_log::{record, Action, Event};
 
 /// Canonicalization failures that the runtime layer can present through
 /// localized tool diagnostics without parsing an English error chain.
@@ -174,11 +174,10 @@ impl DockerRuntime {
             .pod
             .as_deref()
             .map(str::trim)
-            .filter(|p| !p.is_empty());
-        if self.config.podman_remote {
-            if let Some(pod) = pod {
-                process.arg("--pod").arg(pod);
-            }
+            .filter(|p| !p.is_empty())
+            .filter(|_| self.config.podman_remote);
+        if let Some(pod) = pod {
+            process.arg("--pod").arg(pod);
         }
 
         let network = self.config.network.trim();
@@ -204,10 +203,13 @@ impl DockerRuntime {
         }
 
         if let Some(host_workspace) = host_workspace {
+            let mount = match self.config.podman_storage.as_deref() {
+                Some(storage) => format!("{storage}:/workspace:rw,z"),
+                None => format!("{}:/workspace:rw", host_workspace.display()),
+            };
             process
                 .arg("--volume")
-                // .arg(format!("{}:/workspace:rw", host_workspace.display()))
-                .arg("hanaclaw_data:/workspace:rw,z")
+                .arg(mount)
                 .arg("--workdir")
                 .arg("/workspace");
         }
@@ -483,7 +485,7 @@ mod tests {
     #[test]
     fn docker_build_shell_command_includes_runtime_flags() {
         let cfg = DockerRuntimeConfig {
-            is_podman: false,
+            podman: false,
             image: "alpine:3.20".into(),
             network: "none".into(),
             memory_limit_mb: Some(128),
@@ -647,12 +649,10 @@ mod tests {
         let canonical_workspace = workspace.canonicalize().unwrap();
         let expected_mount = format!("{}:/workspace:rw", canonical_workspace.display());
 
-        assert!(
-            command
-                .as_std()
-                .get_args()
-                .any(|arg| arg == std::ffi::OsStr::new(&expected_mount))
-        );
+        assert!(command
+            .as_std()
+            .get_args()
+            .any(|arg| arg == std::ffi::OsStr::new(&expected_mount)));
     }
 
     // ── §3.3 / §3.4 Docker mount & network isolation tests ──
