@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use zeroclaw_api::runtime_traits::{RuntimeAdapter, ShellDialect};
-use zeroclaw_log::{record, Action, Event};
+use zeroclaw_log::{Action, Event, record};
 
 /// Canonicalization failures that the runtime layer can present through
 /// localized tool diagnostics without parsing an English error chain.
@@ -649,13 +649,35 @@ mod tests {
         let canonical_workspace = workspace.canonicalize().unwrap();
         let expected_mount = format!("{}:/workspace:rw", canonical_workspace.display());
 
-        assert!(command
-            .as_std()
-            .get_args()
-            .any(|arg| arg == std::ffi::OsStr::new(&expected_mount)));
+        assert!(
+            command
+                .as_std()
+                .get_args()
+                .any(|arg| arg == std::ffi::OsStr::new(&expected_mount))
+        );
     }
 
     // ── §3.3 / §3.4 Docker mount & network isolation tests ──
+
+    #[test]
+    fn docker_podman_storage_mounts_volume_with_relabel_suffix() {
+        let cfg = DockerRuntimeConfig {
+            podman: true,
+            podman_storage: Some("hanaclaw_data".into()),
+            ..DockerRuntimeConfig::default()
+        };
+        let runtime = DockerRuntime::new(cfg);
+        let command = runtime
+            .build_shell_command_for_test("echo hello", &std::env::temp_dir())
+            .unwrap();
+
+        assert!(
+            command
+                .as_std()
+                .get_args()
+                .any(|arg| arg == OsStr::new("hanaclaw_data:/workspace:rw,z"))
+        );
+    }
 
     #[test]
     fn docker_build_shell_command_includes_network_flag() {
