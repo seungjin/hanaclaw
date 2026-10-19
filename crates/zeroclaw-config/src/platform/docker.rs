@@ -51,7 +51,7 @@ impl DockerRuntime {
     }
 
     fn launcher_name(&self) -> &'static OsStr {
-        if self.config.is_podman {
+        if self.config.podman {
             OsStr::new("podman")
         } else {
             OsStr::new("docker")
@@ -159,20 +159,30 @@ impl DockerRuntime {
         docker: &Path,
     ) -> anyhow::Result<tokio::process::Command> {
         let mut process = tokio::process::Command::new(docker);
+        if self.config.podman_remote {
+            process.arg("--remote");
+        }
         process
-            .arg("--remote")
             .arg("run")
             .arg("--rm")
             .arg("--init")
             .arg("--interactive");
 
-        let network = self.config.network.trim();
-        if !network.is_empty() {
-            if let Some(pod_name) = network.strip_prefix("pod:") {
-                process.arg("--pod").arg(pod_name);
-            } else {
-                process.arg("--network").arg(network);
+        let pod = self
+            .config
+            .pod
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty());
+        if self.config.podman_remote {
+            if let Some(pod) = pod {
+                process.arg("--pod").arg(pod);
             }
+        }
+
+        let network = self.config.network.trim();
+        if !network.is_empty() && pod.is_none() {
+            process.arg("--network").arg(network);
         }
 
         if let Some(memory_limit_mb) = self.config.memory_limit_mb.filter(|mb| *mb > 0) {
@@ -254,7 +264,7 @@ fn docker_env_key(key: &OsStr) -> Result<&str> {
 
 impl RuntimeAdapter for DockerRuntime {
     fn name(&self) -> &str {
-        if self.config.is_podman {
+        if self.config.podman {
             "podman"
         } else {
             "docker"
@@ -351,10 +361,94 @@ mod tests {
     #[test]
     fn docker_runtime_name_podman() {
         let runtime = DockerRuntime::new(DockerRuntimeConfig {
-            is_podman: true,
+            podman: true,
             ..Default::default()
         });
         assert_eq!(runtime.name(), "podman");
+    }
+
+    fn has_remote_flag(runtime: &DockerRuntime) -> bool {
+        runtime
+            .build_shell_command_for_test("echo hello", &std::env::temp_dir())
+            .unwrap()
+            .as_std()
+            .get_args()
+            .any(|arg| arg == OsStr::new("--remote"))
+    }
+
+    #[test]
+    fn docker_remote_flag_defaults_off() {
+        let runtime = DockerRuntime::new(DockerRuntimeConfig {
+            podman: true,
+            ..Default::default()
+        });
+        assert!(!has_remote_flag(&runtime));
+    }
+
+    #[test]
+    fn podman_remote_flag_passes_remote() {
+        let runtime = DockerRuntime::new(DockerRuntimeConfig {
+            podman_remote: true,
+            ..Default::default()
+        });
+        assert!(has_remote_flag(&runtime));
+    }
+
+    fn command_args(runtime: &DockerRuntime) -> Vec<String> {
+        runtime
+            .build_shell_command_for_test("echo hello", &std::env::temp_dir())
+            .unwrap()
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn podman_remote_with_pod_passes_pod_flag() {
+        let runtime = DockerRuntime::new(DockerRuntimeConfig {
+            podman_remote: true,
+            pod: Some("hanaclaw".into()),
+            ..Default::default()
+        });
+        let args = command_args(&runtime);
+        let pod_idx = args
+            .iter()
+            .position(|arg| arg == "--pod")
+            .expect("expected --pod flag");
+        assert_eq!(args.get(pod_idx + 1).map(String::as_str), Some("hanaclaw"));
+    }
+
+    #[test]
+    fn pod_flag_requires_podman_remote() {
+        let runtime = DockerRuntime::new(DockerRuntimeConfig {
+            pod: Some("hanaclaw".into()),
+            ..Default::default()
+        });
+        assert!(!command_args(&runtime).iter().any(|arg| arg == "--pod"));
+    }
+
+    #[test]
+    fn blank_pod_name_is_ignored() {
+        let runtime = DockerRuntime::new(DockerRuntimeConfig {
+            podman_remote: true,
+            pod: Some("   ".into()),
+            ..Default::default()
+        });
+        assert!(!command_args(&runtime).iter().any(|arg| arg == "--pod"));
+    }
+
+    #[test]
+    fn pod_replaces_network_flag() {
+        let runtime = DockerRuntime::new(DockerRuntimeConfig {
+            network: "none".into(),
+            podman_remote: true,
+            pod: Some("hanaclaw".into()),
+            ..Default::default()
+        });
+        let args = command_args(&runtime);
+        assert!(args.iter().any(|arg| arg == "--pod"));
+        assert!(!args.iter().any(|arg| arg == "--network"));
     }
 
     #[test]
@@ -383,6 +477,7 @@ mod tests {
             read_only_rootfs: true,
             mount_workspace: true,
             allowed_workspace_roots: Vec::new(),
+            ..DockerRuntimeConfig::default()
         };
         let runtime = DockerRuntime::new(cfg);
 
