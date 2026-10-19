@@ -413,6 +413,19 @@ pub(crate) enum SidebarStatus {
     Errored,
 }
 
+/// Read-only projection of the session currently focused by one Code or Chat pane.
+///
+/// This stays client-local because model/provider overrides and the message queue
+/// belong to the live pane session, not to the daemon's configured agent view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FocusedRuntimeContext<'a> {
+    pub agent_alias: &'a str,
+    pub model_provider_ref: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub queued_messages: usize,
+    pub queue_paused: bool,
+}
+
 /// One sidebar row: a session this pane tracks, in stable creation order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SidebarSessionSummary {
@@ -3789,6 +3802,19 @@ impl Chat {
         self.maybe_refresh_git_branch();
     }
 
+    /// Whether live transport state is waiting for `tick_transport_events`.
+    ///
+    /// The app's input wait polls this between short slices so streamed
+    /// session updates render promptly instead of waiting out the idle tick,
+    /// and so the bounded notification broadcast is drained often enough not
+    /// to lag (a lag forces a durable transcript reload of every session).
+    pub(crate) fn has_pending_transport_events(&self) -> bool {
+        !self.notif_rx.is_empty()
+            || !self.prompt_completion_rx.is_empty()
+            || !self.session_resync_rx.is_empty()
+            || !self.session_reattach_rx.is_empty()
+    }
+
     #[cfg(test)]
     pub(crate) fn draw(&mut self, frame: &mut Frame, area: Rect) {
         self.draw_with_plan_placement(frame, area, PlanPlacement::Legacy);
@@ -5722,6 +5748,24 @@ impl Chat {
             | ChatPhase::PickChangeDirectory { agent_alias, .. } => Some(agent_alias.as_str()),
             _ => None,
         }
+    }
+
+    /// Runtime context for the pane's focused live session.
+    ///
+    /// Agent-picker and directory-picker phases intentionally return `None`:
+    /// they have a tentative agent choice but no live session whose overrides,
+    /// turn state, or client queue can be reported as active context.
+    pub(crate) fn focused_runtime_context(&self) -> Option<FocusedRuntimeContext<'_>> {
+        let ChatPhase::Active(state) = &self.phase else {
+            return None;
+        };
+        Some(FocusedRuntimeContext {
+            agent_alias: &state.agent_alias,
+            model_provider_ref: state.model_provider_ref.as_deref(),
+            model: state.model.as_deref(),
+            queued_messages: state.queue_len(),
+            queue_paused: state.queue_paused(),
+        })
     }
 
     /// Working directory for the active conversation, if a session is running.
@@ -9814,6 +9858,9 @@ pub struct ChatState {
     /// Model's full context window; when present, the bar denominator so the
     /// trim budget shows as a marker rather than the 100% point.
     pub context_model_window: Option<u64>,
+    /// `(period, limit bits)` of every budget warning shown in this session,
+    /// so the per-turn daemon notice appears once per period and limit.
+    budget_warnings_shown: std::collections::HashSet<(String, u64)>,
     /// Outbound message queue; the front dispatches when the session is free.
     message_queue: MessageQueue,
     cancel_started_at: Option<Instant>,
@@ -9915,6 +9962,7 @@ impl ChatState {
             context_input_tokens_source: None,
             context_max_tokens: None,
             context_model_window: None,
+            budget_warnings_shown: std::collections::HashSet::new(),
             message_queue: MessageQueue::default(),
             cancel_started_at: None,
             queue_item_rects: Vec::new(),
@@ -11372,7 +11420,8 @@ impl ChatState {
             | SessionUpdate::ContextUsage { session_id, .. }
             | SessionUpdate::HistoryTrimmed { session_id, .. }
             | SessionUpdate::TurnComplete { session_id, .. }
-            | SessionUpdate::Plan { session_id, .. } => session_id.as_str(),
+            | SessionUpdate::Plan { session_id, .. }
+            | SessionUpdate::BudgetWarning { session_id, .. } => session_id.as_str(),
         };
         if update_sid != self.session_id {
             return;
@@ -11442,7 +11491,7 @@ impl ChatState {
                 // Cap stored output so large tool responses (bash, file reads) don't
                 // accumulate unboundedly. The same bound is applied to restored cards.
                 let raw_output = bounded_tool_output(raw_output);
-                for entry in self.entries.iter_mut().rev() {
+                for (entry_index, entry) in self.entries.iter_mut().enumerate().rev() {
                     if let ChatEntry::Tool {
                         tool_call_id: id,
                         result,
@@ -11451,7 +11500,12 @@ impl ChatState {
                         && id.as_ref() == tool_call_id.as_str()
                     {
                         *result = Some(Arc::<str>::from(raw_output));
-                        self.mark_dirty_full(); // mutation of existing entry
+                        // Usually the tail entry: re-render only that card.
+                        // `rebuild_lines` falls back to a full rebuild when
+                        // the mutated entry is not the cached tail (parallel
+                        // tool calls), so this is never stale.
+                        self.invalidate_url_interactions();
+                        self.mark_dirty_tail(entry_index);
                         break;
                     }
                 }
@@ -11594,6 +11648,43 @@ impl ChatState {
                         ),
                     }
                 };
+                self.entries
+                    .push(ChatEntry::SystemMessage(Arc::<str>::from(notice)));
+                self.mark_dirty_append();
+            }
+            SessionUpdate::BudgetWarning {
+                current_usd,
+                limit_usd,
+                period,
+                ..
+            } => {
+                // The daemon sends one per turn while spend is over the
+                // threshold; show it once per period and limit per session.
+                if !self
+                    .budget_warnings_shown
+                    .insert((period.clone(), limit_usd.to_bits()))
+                {
+                    return;
+                }
+                let percent = if limit_usd > 0.0 {
+                    (current_usd / limit_usd * 100.0).floor().min(999.0) as u64
+                } else {
+                    100
+                };
+                let msg_key = if period == "month" {
+                    "zc-chat-budget-warning-month"
+                } else {
+                    "zc-chat-budget-warning-day"
+                };
+                let notice = crate::i18n::t_args(
+                    msg_key,
+                    &[
+                        ("spent", &format!("{current_usd:.2}")),
+                        ("limit", &format!("{limit_usd:.2}")),
+                        ("percent", &percent.to_string()),
+                    ],
+                );
+                self.freeze_prompt_settled_stream();
                 self.entries
                     .push(ChatEntry::SystemMessage(Arc::<str>::from(notice)));
                 self.mark_dirty_append();
@@ -12459,6 +12550,9 @@ impl ChatState {
         self.context_input_tokens_source = None;
         self.context_max_tokens = None;
         self.context_model_window = None;
+        // Budget warnings shown are per-session too: a new session gets its
+        // own first notice.
+        self.budget_warnings_shown.clear();
         // The TodoWrite plan is per-session; drop it (and its show/hide state)
         // so a switched-to session doesn't inherit the previous plan's tasks.
         // Rebuilding from freshly resolved settings also applies any Config-pane
@@ -12621,6 +12715,28 @@ mod tests {
             "myagent".to_string(),
             crate::todo_tracker::TodoTrackerSettings::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn focused_runtime_context_reads_live_overrides_and_client_queue_state() {
+        let (mut chat, _writer_rx) = test_chat();
+        let mut active = state();
+        active.set_model_identity(Some("openai.session"), Some("gpt-session"));
+        active.turn_status = TurnStatus::WaitingForApproval;
+        active
+            .enqueue_message("queued follow-up".to_string(), Vec::new())
+            .expect("queue has capacity");
+        assert!(active.toggle_queue_pause());
+        chat.phase = ChatPhase::Active(Box::new(active));
+
+        let context = chat
+            .focused_runtime_context()
+            .expect("active session has runtime context");
+        assert_eq!(context.agent_alias, "myagent");
+        assert_eq!(context.model_provider_ref, Some("openai.session"));
+        assert_eq!(context.model, Some("gpt-session"));
+        assert_eq!(context.queued_messages, 1);
+        assert!(context.queue_paused);
     }
 
     fn url_hit(rect: Rect, url: &str, row: u16, byte_start: usize) -> UrlHitRegion {
@@ -17758,6 +17874,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<String>(16);
         let rpc = Arc::new(RpcOutbound::new(tx));
         let mut chat = two_session_chat(&rpc);
+        assert!(!chat.has_pending_transport_events());
         if let Some(b) = chat.background.first_mut() {
             b.turn_in_flight = true;
         }
@@ -17769,6 +17886,10 @@ mod tests {
                 "session_id": "sess-b",
                 "text": "hi",
             }),
+        );
+        assert!(
+            chat.has_pending_transport_events(),
+            "a queued notification must wake the input wait"
         );
         chat.rpc.push_notification_for_test(
             "session/update",
@@ -17782,6 +17903,7 @@ mod tests {
             }),
         );
         chat.drain_notifications();
+        assert!(!chat.has_pending_transport_events());
 
         let b = chat.background.first().expect("background session");
         assert_eq!(b.turn_status, TurnStatus::WaitingForApproval);
@@ -25666,6 +25788,82 @@ mod tests {
         assert_eq!(s.current_agent_text(), "Hello world");
     }
 
+    fn budget_warning(current_usd: f64, limit_usd: f64, period: &str) -> SessionUpdate {
+        SessionUpdate::BudgetWarning {
+            session_id: "sess-1".to_string(),
+            current_usd,
+            limit_usd,
+            period: period.to_string(),
+        }
+    }
+
+    fn system_messages(s: &ChatState) -> Vec<String> {
+        s.entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ChatEntry::SystemMessage(text) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn budget_warning_shows_one_notice_per_period_and_limit() {
+        let mut s = state();
+        s.apply_update(budget_warning(8.25, 10.0, "day"));
+        // The daemon repeats it every turn while spend stays over the line.
+        s.apply_update(budget_warning(9.10, 10.0, "day"));
+        let notices = system_messages(&s);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("8.25"), "{}", notices[0]);
+        assert!(notices[0].contains("10.00"), "{}", notices[0]);
+        assert!(notices[0].contains("82%"), "{}", notices[0]);
+        assert!(notices[0].contains("daily"), "{}", notices[0]);
+
+        // A raised limit or the other period is news again.
+        s.apply_update(budget_warning(16.5, 20.0, "day"));
+        s.apply_update(budget_warning(850.0, 1000.0, "month"));
+        let notices = system_messages(&s);
+        assert_eq!(notices.len(), 3, "{notices:?}");
+        assert!(notices[2].contains("monthly"), "{}", notices[2]);
+
+        // Coming back to a pair already shown stays quiet, even after others.
+        s.apply_update(budget_warning(8.75, 10.0, "day"));
+        assert_eq!(system_messages(&s).len(), 3);
+    }
+
+    #[test]
+    fn a_new_session_shows_its_own_budget_warning() {
+        let mut s = state();
+        s.apply_update(budget_warning(8.25, 10.0, "day"));
+        s.reset_for_session(
+            "sess-2".to_string(),
+            None,
+            crate::todo_tracker::TodoTrackerSettings::default(),
+        );
+        s.apply_update(SessionUpdate::BudgetWarning {
+            session_id: "sess-2".to_string(),
+            current_usd: 8.5,
+            limit_usd: 10.0,
+            period: "day".to_string(),
+        });
+        let notices = system_messages(&s);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("8.50"), "{}", notices[0]);
+    }
+
+    #[test]
+    fn budget_warning_for_another_session_is_ignored() {
+        let mut s = state();
+        s.apply_update(SessionUpdate::BudgetWarning {
+            session_id: "other".to_string(),
+            current_usd: 8.25,
+            limit_usd: 10.0,
+            period: "day".to_string(),
+        });
+        assert!(system_messages(&s).is_empty());
+    }
+
     #[test]
     fn history_trimmed_update_adds_visible_system_notice() {
         let mut s = state();
@@ -26005,6 +26203,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn tool_result_rerenders_only_the_tail_card_and_matches_full_rebuild() {
+        let mut s = state();
+        for id in ["tc1", "tc2"] {
+            s.apply_update(SessionUpdate::ToolCall {
+                session_id: "sess-1".to_string(),
+                tool_call_id: id.to_string(),
+                name: "shell".to_string(),
+                raw_input: serde_json::json!({"command": id}),
+            });
+        }
+        let width = 60;
+        s.rebuild_lines(width);
+
+        // Tail result: incremental tail path, identical to a full rebuild.
+        s.apply_update(SessionUpdate::ToolResult {
+            session_id: "sess-1".to_string(),
+            tool_call_id: "tc2".to_string(),
+            raw_output: "tail output\n".to_string(),
+        });
+        assert_eq!(s.transcript_layout.view().dirty, LinesDirty::TailChanged(1));
+        s.rebuild_lines(width);
+        let incremental = s.transcript_layout.view().cached_lines.clone();
+        s.transcript_layout.invalidate_full();
+        s.rebuild_lines(width);
+        assert_eq!(incremental, s.transcript_layout.view().cached_lines);
+
+        // Non-tail result (parallel tool calls) still renders correctly.
+        s.apply_update(SessionUpdate::ToolResult {
+            session_id: "sess-1".to_string(),
+            tool_call_id: "tc1".to_string(),
+            raw_output: "earlier output\n".to_string(),
+        });
+        s.rebuild_lines(width);
+        let fallback = s.transcript_layout.view().cached_lines.clone();
+        s.transcript_layout.invalidate_full();
+        s.rebuild_lines(width);
+        assert_eq!(fallback, s.transcript_layout.view().cached_lines);
     }
 
     #[test]

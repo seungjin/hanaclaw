@@ -306,7 +306,7 @@ jobs:
       - name: Prepare bounded Linux ARM64 build memory
         id: dist_memory
         timeout-minutes: 5
-        if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
+        if: runner.os == 'Linux' && (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-musl')
         shell: bash
         run: bash scripts/ci/dist_runner_memory.sh prepare
 
@@ -318,7 +318,7 @@ jobs:
           linker: ${{ matrix.linker || '' }}
           use_cross: ${{ matrix.use_cross || 'false' }}
           emit_features: 'false'
-          cargo-jobs: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '2' || '' }}
+          cargo-jobs: ${{ (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-musl') && '2' || '' }}
 
       - name: Check binary size
         shell: bash
@@ -348,7 +348,7 @@ jobs:
 
       - name: Report and release owned Linux ARM64 build memory
         timeout-minutes: 5
-        if: always() && runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
+        if: always() && runner.os == 'Linux' && (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-musl')
         shell: bash
         env:
           ZC_DIST_SWAP_FILE: ${{ steps.dist_memory.outputs.swap_file }}

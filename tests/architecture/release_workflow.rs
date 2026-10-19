@@ -319,7 +319,12 @@ fn shared_release_recipe() -> String {
     body
 }
 
-fn assert_release_caller(step: &str, emit_features: &str) {
+/// The Stable build gives both Linux ARM64 targets the bounded memory helper
+/// and two build jobs; the GNU-only qualification job has no musl leg.
+const STABLE_ARM64_TARGETS: &str = "(matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-musl')";
+const GNU_ARM64_TARGET: &str = "matrix.target == 'aarch64-unknown-linux-gnu'";
+
+fn assert_release_caller(step: &str, emit_features: &str, arm64_targets: &str) {
     assert!(step.contains("        uses: ./.github/actions/build-release-payloads\n"));
     assert!(!step.contains("shell:") && !step.contains("run:"));
     assert_eq!(
@@ -331,43 +336,49 @@ fn assert_release_caller(step: &str, emit_features: &str) {
                 "          linker: ${{{{ matrix.linker || '' }}}}\n",
                 "          use_cross: ${{{{ matrix.use_cross || 'false' }}}}\n",
                 "          emit_features: '{}'\n",
-                "          cargo-jobs: ${{{{ matrix.target == 'aarch64-unknown-linux-gnu' && '2' || '' }}}}"
+                "          cargo-jobs: ${{{{ {} && '2' || '' }}}}"
             ),
-            emit_features
+            emit_features, arm64_targets
         )
     );
 }
 
-fn arm64_build_memory_steps() -> [&'static str; 2] {
+fn arm64_build_memory_steps(arm64_targets: &str) -> [String; 2] {
     [
-        concat!(
-            "      - name: Prepare bounded Linux ARM64 build memory\n",
-            "        id: dist_memory\n",
-            "        timeout-minutes: 5\n",
-            "        if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'\n",
-            "        shell: bash\n",
-            "        run: bash scripts/ci/dist_runner_memory.sh prepare\n\n"
+        format!(
+            concat!(
+                "      - name: Prepare bounded Linux ARM64 build memory\n",
+                "        id: dist_memory\n",
+                "        timeout-minutes: 5\n",
+                "        if: runner.os == 'Linux' && {}\n",
+                "        shell: bash\n",
+                "        run: bash scripts/ci/dist_runner_memory.sh prepare\n\n"
+            ),
+            arm64_targets
         ),
-        concat!(
-            "      - name: Report and release owned Linux ARM64 build memory\n",
-            "        timeout-minutes: 5\n",
-            "        if: always() && runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'\n",
-            "        shell: bash\n",
-            "        env:\n",
-            "          ZC_DIST_SWAP_FILE: ${{ steps.dist_memory.outputs.swap_file }}\n",
-            "          ZC_DIST_SWAP_IDENTITY: ${{ steps.dist_memory.outputs.swap_identity }}\n",
-            "        run: bash scripts/ci/dist_runner_memory.sh cleanup\n\n"
+        format!(
+            concat!(
+                "      - name: Report and release owned Linux ARM64 build memory\n",
+                "        timeout-minutes: 5\n",
+                "        if: always() && runner.os == 'Linux' && {}\n",
+                "        shell: bash\n",
+                "        env:\n",
+                "          ZC_DIST_SWAP_FILE: ${{{{ steps.dist_memory.outputs.swap_file }}}}\n",
+                "          ZC_DIST_SWAP_IDENTITY: ${{{{ steps.dist_memory.outputs.swap_identity }}}}\n",
+                "        run: bash scripts/ci/dist_runner_memory.sh cleanup\n\n"
+            ),
+            arm64_targets
         ),
     ]
 }
 
-fn assert_arm64_build_memory(job: &str) {
-    let [prepare, cleanup] = arm64_build_memory_steps();
-    assert_eq!(job.matches(prepare).count(), 1);
-    assert_eq!(job.matches(cleanup).count(), 1);
+fn assert_arm64_build_memory(job: &str, arm64_targets: &str) {
+    let [prepare, cleanup] = arm64_build_memory_steps(arm64_targets);
+    assert_eq!(job.matches(&prepare).count(), 1);
+    assert_eq!(job.matches(&cleanup).count(), 1);
     assert_eq!(job.matches("dist_runner_memory.sh").count(), 2);
     let build = job.find("      - name: Build release\n").unwrap();
-    assert!(job.find(prepare).unwrap() < build && build < job.find(cleanup).unwrap());
+    assert!(job.find(&prepare).unwrap() < build && build < job.find(&cleanup).unwrap());
     let emit_features = if job.contains("emit_features: 'true'") {
         "true"
     } else {
@@ -376,14 +387,15 @@ fn assert_arm64_build_memory(job: &str) {
     assert_release_caller(
         yaml_block(job, "      - name: Build release\n"),
         emit_features,
+        arm64_targets,
     );
 }
 
-fn without_arm64_build_memory(document: &str) -> String {
+fn without_arm64_build_memory(document: &str, arm64_targets: &str) -> String {
     let mut document = document.to_owned();
-    for step in arm64_build_memory_steps() {
-        assert_eq!(document.matches(step).count(), 1);
-        document = document.replacen(step, "", 1);
+    for step in arm64_build_memory_steps(arm64_targets) {
+        assert_eq!(document.matches(&step).count(), 1);
+        document = document.replacen(&step, "", 1);
     }
     document
 }
@@ -586,11 +598,11 @@ fn immutable_stable_release_recipe_has_real_command_and_failure_baselines() {
         OLD_RELEASE_RECIPE_SHA256
     );
     let original = workflow("release-stable-manual.yml");
-    assert_arm64_build_memory(yaml_block(&original, "  build:\n"));
-    let release = without_arm64_build_memory(&original);
+    assert_arm64_build_memory(yaml_block(&original, "  build:\n"), STABLE_ARM64_TARGETS);
+    let release = without_arm64_build_memory(&original, STABLE_ARM64_TARGETS);
     let build = yaml_block(&release, "  build:\n");
     let caller = yaml_block(build, "      - name: Build release\n");
-    assert_release_caller(caller, "false");
+    assert_release_caller(caller, "false", STABLE_ARM64_TARGETS);
     // Pin every byte outside the one reviewed step wrapper. The independent
     // shared-body gate below inverts the input adapters to the immutable body.
     let start = release.find("      - name: Build release\n").unwrap();
@@ -919,12 +931,12 @@ fn release_payload_callers_bind_the_actual_recipe_and_reject_binding_mutants() {
     let stable = workflow("release-stable-manual.yml");
     let manual = workflow("cross-platform-build-manual.yml");
     let body = shared_release_recipe();
-    for (document, job, emit) in [
-        (&stable, "  build:\n", "false"),
-        (&manual, "  stable-gnu-build:\n", "true"),
+    for (document, job, emit, arm64_targets) in [
+        (&stable, "  build:\n", "false", STABLE_ARM64_TARGETS),
+        (&manual, "  stable-gnu-build:\n", "true", GNU_ARM64_TARGET),
     ] {
         let caller = yaml_block(yaml_block(document, job), "      - name: Build release\n");
-        assert_release_caller(caller, emit);
+        assert_release_caller(caller, emit, arm64_targets);
         for (before, after) in [
             ("target: ${{ matrix.target }}", "target: ${{ matrix.os }}"),
             ("linker: ${{ matrix.linker || '' }}", "linker: ''"),
@@ -943,7 +955,8 @@ fn release_payload_callers_bind_the_actual_recipe_and_reject_binding_mutants() {
             assert!(caller.contains(before));
             let mutant = caller.replacen(before, after, 1);
             assert!(
-                std::panic::catch_unwind(|| assert_release_caller(&mutant, emit)).is_err(),
+                std::panic::catch_unwind(|| assert_release_caller(&mutant, emit, arm64_targets))
+                    .is_err(),
                 "the actual caller binding mutant must be refused: {before}"
             );
         }
@@ -1142,10 +1155,14 @@ fn assert_manual_qualification_wiring(manual: &str) {
     assert!(build.contains("timeout-minutes: 90"));
     assert_eq!(build.matches("- os: ubuntu-22.04").count(), 4);
     // GNU ARM64: run 38836146884 and the 10/10 helper versus 0/5 baseline require the existing bounded helper.
-    assert_arm64_build_memory(build);
+    assert_arm64_build_memory(build, GNU_ARM64_TARGET);
     assert!(!build.contains("--jobs"));
     assert!(!build.contains("cache-targets:"));
-    assert_release_caller(yaml_block(build, "      - name: Build release\n"), "true");
+    assert_release_caller(
+        yaml_block(build, "      - name: Build release\n"),
+        "true",
+        GNU_ARM64_TARGET,
+    );
     let inputs = yaml_block(
         build,
         "      - name: Record input manifest and ABI observations\n",
