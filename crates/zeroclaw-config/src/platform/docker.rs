@@ -160,6 +160,7 @@ impl DockerRuntime {
     ) -> anyhow::Result<tokio::process::Command> {
         let mut process = tokio::process::Command::new(docker);
         process
+            .arg("--remote")
             .arg("run")
             .arg("--rm")
             .arg("--init")
@@ -194,7 +195,8 @@ impl DockerRuntime {
         if let Some(host_workspace) = host_workspace {
             process
                 .arg("--volume")
-                .arg(format!("{}:/workspace:rw", host_workspace.display()))
+                // .arg(format!("{}:/workspace:rw", host_workspace.display()))
+                .arg("hanaclaw_data:/workspace:rw,z")
                 .arg("--workdir")
                 .arg("/workspace");
         }
