@@ -55,7 +55,18 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
   const { locale, setAppLocale } = useLocaleContext();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
+  const [twoColumnLanguages, setTwoColumnLanguages] = useState(
+    () => typeof window !== 'undefined' && window.innerHeight < 900,
+  );
   const langRef = useRef<HTMLDivElement>(null);
+
+  // Keep the locale menu one screen tall: switch to two columns when the
+  // viewport is too short for a single 32-row column.
+  useEffect(() => {
+    const onResize = () => setTwoColumnLanguages(window.innerHeight < 900);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   // Fall back to a plain title for unknown routes rather than mislabeling
   // them as "Dashboard" — e.g. early /quickstart hits before the entry was
@@ -162,9 +173,17 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
                 style={{
                   background: 'var(--pc-bg-elevated)',
                   borderColor: 'var(--pc-border)',
-                  maxHeight: '360px',
+                  // Show all 32 locales without scrolling (~870px at the
+                  // current row height). The cap is the viewport minus the
+                  // header and margin, so short windows scroll instead.
+                  maxHeight: 'calc(100vh - 72px)',
                   overflowY: 'auto',
-                  minWidth: '200px',
+                  minWidth: '240px',
+                  // Below ~900px tall a single column would scroll; two
+                  // columns halve the height so every locale stays visible.
+                  ...(twoColumnLanguages
+                    ? { display: 'grid', gridTemplateColumns: '1fr 1fr', minWidth: '380px' }
+                    : {}),
                   zIndex: 9999,
                 }}
               >
@@ -176,7 +195,7 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
                       setAppLocale(code);
                       setLangOpen(false);
                     }}
-                    className="w-full px-3 py-2 text-xs text-left flex items-center gap-2.5 transition-colors"
+                    className="w-full px-3 py-1.5 text-xs text-left flex items-center gap-2.5 transition-colors"
                     style={{
                       color: code === locale ? 'var(--pc-accent)' : 'var(--pc-text-secondary)',
                       background: code === locale ? 'var(--pc-accent-glow)' : 'transparent',
