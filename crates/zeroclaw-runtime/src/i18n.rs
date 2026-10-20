@@ -184,6 +184,7 @@ fn builtin_cli_ftl_source(locale: &str) -> Option<&'static str> {
         "fr" => Some(include_str!("../locales/fr/cli.ftl")),
         "ja" => Some(include_str!("../locales/ja/cli.ftl")),
         "zh-CN" => Some(include_str!("../locales/zh-CN/cli.ftl")),
+        "ko" => Some(include_str!("../locales/ko/cli.ftl")),
         _ => None,
     }
 }
@@ -454,6 +455,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ];
 
         for (source, locale) in locales {
@@ -500,6 +502,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             for key in keys {
                 let value = format_ftl_message(source, locale, key, &[])
@@ -784,6 +787,10 @@ mod tests {
                 "zh-CN",
                 format_ftl_messages(include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
             ),
+            (
+                "ko",
+                format_ftl_messages(include_str!("../locales/ko/cli.ftl"), "ko"),
+            ),
         ];
         for (key, expected_en) in keys {
             let en_value = en_map
@@ -936,6 +943,7 @@ mod tests {
         for source in [
             (include_str!("../locales/en/cli.ftl"), "en"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             for (key, args, expected_parts) in keys {
                 let value = format_ftl_message(source.0, source.1, key, args)
@@ -1138,6 +1146,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             for (key_name, args, must_contain) in &cases {
                 let value = format_ftl_message(source, locale, key_name, args)
@@ -1752,7 +1761,7 @@ mod tests {
         // This warning is what tells an operator why a stranger's reply to a
         // group approval token will bounce, so a catalogue that omits it ships
         // the raw `{key}` sentinel into a chat. Assert every shipped catalogue
-        // carries it, and that the four localized ones are actually translated
+        // carries it, and that each localized one is actually translated
         // rather than copied from `en` — a copy would pass a mere
         // "the key resolves" check while leaving the string un-localized.
         const KEY: &str = "channel-approval-group-visibility-warning";
@@ -1769,6 +1778,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             let value = format_ftl_message(source, locale, KEY, &[])
                 .unwrap_or_else(|| panic!("{KEY} should format in {locale}"));
@@ -1811,6 +1821,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             for &(key, args, expected_parts) in &cases {
                 let value = format_ftl_message(source, locale, key, args)
@@ -1891,6 +1902,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             for &(key, args, expected_parts) in &cases {
                 let value = format_ftl_message(source, locale, key, args)
@@ -1919,6 +1931,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             for (key, expected_parts) in cases {
                 let value = format_ftl_message(source, locale, key, &[("tool", tool)])
@@ -2003,6 +2016,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             let value = format_ftl_message(source, locale, "cli-plugin-config-entry-key", &args)
                 .unwrap_or_else(|| panic!("plugin config entry key should format in {locale}"));
@@ -2197,6 +2211,7 @@ mod tests {
                 (include_str!("../locales/fr/cli.ftl"), "fr"),
                 (include_str!("../locales/ja/cli.ftl"), "ja"),
                 (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+                (include_str!("../locales/ko/cli.ftl"), "ko"),
             ] {
                 let value = format_ftl_message(source, locale, key, args)
                     .unwrap_or_else(|| panic!("{key} should format in {locale}"));
@@ -2222,6 +2237,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             assert_eq!(
                 format_ftl_message(
@@ -2536,6 +2552,7 @@ mod tests {
                 (include_str!("../locales/fr/cli.ftl"), "fr"),
                 (include_str!("../locales/ja/cli.ftl"), "ja"),
                 (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+                (include_str!("../locales/ko/cli.ftl"), "ko"),
             ] {
                 let value = format_ftl_message(source, locale, key, args)
                     .unwrap_or_else(|| panic!("{key} should format in {locale}"));
@@ -2646,6 +2663,7 @@ mod tests {
                 (include_str!("../locales/fr/cli.ftl"), "fr"),
                 (include_str!("../locales/ja/cli.ftl"), "ja"),
                 (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+                (include_str!("../locales/ko/cli.ftl"), "ko"),
             ] {
                 let value = format_ftl_message(source, locale, key, args)
                     .unwrap_or_else(|| panic!("{key} should format in {locale}"));
@@ -2732,6 +2750,7 @@ mod tests {
                 (include_str!("../locales/fr/cli.ftl"), "fr"),
                 (include_str!("../locales/ja/cli.ftl"), "ja"),
                 (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+                (include_str!("../locales/ko/cli.ftl"), "ko"),
             ] {
                 let value = format_ftl_message(source, locale, key, args)
                     .unwrap_or_else(|| panic!("{key} should format in {locale}"));
@@ -2997,6 +3016,7 @@ mod tests {
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ] {
             for (key, args, expected_parts) in cases {
                 let value = format_ftl_message(source, locale, key, args)
@@ -3218,7 +3238,7 @@ mod tests {
 
     #[test]
     fn non_english_locales_format_context_window_args() {
-        for locale in ["es", "fr", "ja", "zh-CN"] {
+        for locale in ["es", "fr", "ja", "zh-CN", "ko"] {
             let sources = load_cli_ftl_sources(locale);
 
             for (key, args) in [
@@ -3409,6 +3429,7 @@ mod tests {
                 "fr" => "uniquement après avoir vérifié",
                 "ja" => "確認してから",
                 "zh-CN" => "确认设置和访问权限后",
+                "ko" => "검토한 뒤",
                 _ => unreachable!("unlisted committed locale: {locale}"),
             };
             assert!(enable.contains(expected), "{locale}: {enable}");
@@ -3426,6 +3447,7 @@ mod tests {
                 "fr" => "automatisation AppleScript",
                 "ja" => "AppleScript オートメーション",
                 "zh-CN" => "AppleScript 自动化",
+                "ko" => "AppleScript 자동화",
                 _ => unreachable!("unlisted committed locale: {locale}"),
             };
             assert!(
@@ -3446,6 +3468,7 @@ mod tests {
                 "fr" => "accès complet au disque",
                 "ja" => "フルディスクアクセス",
                 "zh-CN" => "完全磁盘访问权限",
+                "ko" => "전체 디스크 접근 권한",
                 _ => unreachable!("unlisted committed locale: {locale}"),
             };
             assert!(
@@ -3475,6 +3498,7 @@ mod tests {
                 "fr" => assert!(unknown.contains("Intégration inconnue")),
                 "ja" => assert!(unknown.contains("不明なインテグレーション")),
                 "zh-CN" => assert!(unknown.contains("未知的集成")),
+                "ko" => assert!(unknown.contains("알 수 없는 통합")),
                 "en" => assert!(unknown.contains("Unknown integration")),
                 _ => unreachable!("unlisted committed locale: {locale}"),
             }
@@ -3483,7 +3507,7 @@ mod tests {
 
     #[test]
     fn provider_terminal_failure_endpoint_messages_are_owned_by_each_locale() {
-        for locale in ["en", "es", "fr", "ja", "zh-CN"] {
+        for locale in ["en", "es", "fr", "ja", "zh-CN", "ko"] {
             let sources = load_cli_ftl_sources(locale);
             for key in [
                 "cli-agent-error-provider-connection-local",
@@ -3594,21 +3618,22 @@ mod tests {
         "channel-approval-opt-reject-with-edit",
     ];
 
-    fn committed_locale_sources() -> [(&'static str, &'static str); 5] {
+    fn committed_locale_sources() -> [(&'static str, &'static str); 6] {
         [
             (include_str!("../locales/en/cli.ftl"), "en"),
             (include_str!("../locales/es/cli.ftl"), "es"),
             (include_str!("../locales/fr/cli.ftl"), "fr"),
             (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
+            (include_str!("../locales/ko/cli.ftl"), "ko"),
         ]
     }
 
     #[test]
     fn channel_approval_keys_are_defined_in_every_locale() {
         // Key-parity + command-preservation guard: every new
-        // `channel-approval-*` key must be defined in all 5 committed
-        // locales, and the complete Rust-built reply commands — plus the
+        // `channel-approval-*` key must be defined in every committed
+        // locale, and the complete Rust-built reply commands — plus the
         // tool arg — must survive translation verbatim.
         for (source, locale) in committed_locale_sources() {
             for key in CHANNEL_APPROVAL_ARGLESS_KEYS {
