@@ -55,15 +55,19 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
   const { locale, setAppLocale } = useLocaleContext();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
+  // A single column is ~868px tall (31 rows), and the menu opens ~50px from
+  // the top of the viewport. Below this height the last rows would sit under
+  // the fold, so the menu switches to two columns instead.
+  const singleColumnFits = (height: number) => height >= 950;
   const [twoColumnLanguages, setTwoColumnLanguages] = useState(
-    () => typeof window !== 'undefined' && window.innerHeight < 900,
+    () => typeof window !== 'undefined' && !singleColumnFits(window.innerHeight),
   );
   const langRef = useRef<HTMLDivElement>(null);
 
   // Keep the locale menu one screen tall: switch to two columns when the
-  // viewport is too short for a single 32-row column.
+  // viewport is too short for a single 31-row column.
   useEffect(() => {
-    const onResize = () => setTwoColumnLanguages(window.innerHeight < 900);
+    const onResize = () => setTwoColumnLanguages(!singleColumnFits(window.innerHeight));
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
@@ -89,6 +93,31 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // The locale menu labels each row with its own endonym, which the system
+  // font may be unable to render (e.g. `한국어` on a host without a Hangul
+  // font). Emit one warning per affected locale so a blank-looking row can be
+  // traced from the console instead of being mistaken for a missing entry.
+  useEffect(() => {
+    const ctx = document.createElement('canvas').getContext('2d');
+    if (!ctx) return;
+    const width = (text: string, font: string) => {
+      ctx.font = font;
+      return ctx.measureText(text).width;
+    };
+    const tofu = width('\u{10FFFD}', '16px sans-serif');
+    // Same advance width as an unassigned glyph means the browser drew
+    // replacement boxes rather than the locale's script.
+    const missing = SUPPORTED_LOCALES.filter(({ name }) => {
+      const fallback = width(name, '16px sans-serif');
+      return fallback > 0 && Math.abs(fallback - tofu) <= 0.01;
+    }).map(({ code }) => code);
+    if (missing.length > 0) {
+      console.warn(
+        `[i18n] These language names have no glyphs in the system font: ${missing.join(', ')}`,
+      );
+    }
   }, []);
 
   return (
@@ -173,13 +202,13 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
                 style={{
                   background: 'var(--pc-bg-elevated)',
                   borderColor: 'var(--pc-border)',
-                  // Show all 32 locales without scrolling (~870px at the
+                  // Show all 31 locales without scrolling (~868px at the
                   // current row height). The cap is the viewport minus the
                   // header and margin, so short windows scroll instead.
                   maxHeight: 'calc(100vh - 72px)',
                   overflowY: 'auto',
                   minWidth: '240px',
-                  // Below ~900px tall a single column would scroll; two
+                  // Below ~950px tall a single column would scroll; two
                   // columns halve the height so every locale stays visible.
                   ...(twoColumnLanguages
                     ? { display: 'grid', gridTemplateColumns: '1fr 1fr', minWidth: '380px' }
