@@ -35,4 +35,8 @@ pub const AVAILABLE_LOCALES: &[LocaleOption] = &[
         code: "zh-CN",
         label: "中文",
     },
+    LocaleOption {
+        code: "ko",
+        label: "한국어",
+    },
 ];
