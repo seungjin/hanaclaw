@@ -10142,7 +10142,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'dash.metric.spend.untracked': "에이전트별 추적 꺼짐",
 
     // cfg
-    'cfg.header.quickstart': "빠른 시작 다시 실행",
+    'cfg.header.quickstart': "빠른 재시작",
     'cfg.field.commentAdd': "주석 추가",
     'cfg.field.commentHide': "주석 제거",
     'cfg.field.commentPlaceholder': "선택 사항: 주석 (이유)",
