@@ -1,14 +1,51 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zeroclaw-env
+data:
+  ZEROCLAW_gateway__allow_public_bind: "true"
+  ZEROCLAW_gateway__port: "42617"
+  ZEROCLAW_gateway__host: 0.0.0.0
+  ZEROCLAW_gateway__allow_remote_admin: "true"
+  ZEROCLAW_CONFIG_DIR: /zeroclaw-data
+  ZEROCLAW_DATA_DIR: /zeroclaw-data/data
+  ZEROCLAW_storage__qdrant__default__url: http://localhost:6333
+  ZEROCLAW_storage__qdrant__default__collection: zeroclaw_memories
+  CONTAINER_HOST: unix:///run/podman/podman.sock
+  DOCKER_HOST: unix:///run/podman/podman.sock
+  PATH: /bin:/usr/bin:/usr/local/bin
+  OLLAMA_HOST: http://localhost:11434
+  QDRANT_HOST: http://localhost:6333
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ollama
+type: Opaque
+data:
+  OLLAMA_API_KEY: <REDACTED> #should be from podman secret
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: hanaclaw
+  annotations:
+    io.podman.annotations.security.opt: "label=disable"
+    io.podman.annotations.group-add: "keep-groups"
+    volume.podman.io/z-mode.podman-sock: "z"
 spec:
   containers:
     - name: ollama
       image: docker.io/ollama/ollama:latest
+      env:
+        - name: OLLAMA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ollama
+              key: OLLAMA_API_KEY
       ports:
         - containerPort: 11434
-          hostPort: 9100
+          hostPort: 9140
       volumeMounts:
         - mountPath: /root/.ollama
           name: ollama-data
@@ -17,36 +54,58 @@ spec:
       image: docker.io/qdrant/qdrant:latest
       ports:
         - containerPort: 6333
-          hostPort: 9110
+          hostPort: 9150
         - containerPort: 6334
-          hostPort: 9120
+          hostPort: 9152
       volumeMounts:
         - mountPath: /qdrant/storage
           name: qdrant-data
 
     - name: zeroclaw
-      image: docker.io/zeroclaw/zeroclaw:latest
+      image: ghcr.io/seungjin/hanaclaw:latest
+      imagePullPolicy: Never
+      securityContext:
+        privileged: true
       ports:
         - containerPort: 42617
-          hostPort: 9130
-      env:
-        - name: OLLAMA_HOST
-          value: "http://localhost:11434"
-        - name: QDRANT_HOST
-          value: "http://localhost:6333"
+          hostPort: 9160
+      envFrom:
+        - configMapRef:
+            name: zeroclaw-env
       volumeMounts:
         - mountPath: /zeroclaw-data
           name: zeroclaw-data
-
+        - mountPath: /run/podman/podman.sock
+          name: podman-sock
+        - name: podman-config
+          mountPath: /home/seungjin/.config/containers
+        - name: podman-storage
+          mountPath: /home/seungjin/.local/share/container/storage
+          mountPropagation: HostToContainer
+      command: ["zeroclaw"]
+      args: ["daemon", "--log-level", "debug", "--verbose"]
   volumes:
+    - name: podman-sock
+      hostPath:
+        path: /run/user/1000/podman/podman.sock
+        type: Socket
+    - name: podman-storage
+      hostPath:
+        path: /home/seungjin/.local/share/containers/storage
+        type: Directory
+    - name: podman-config
+      hostPath:
+        path: /home/seungjin/.config/containers
+        type: Directory
     - name: ollama-data
       persistentVolumeClaim:
         claimName: ollama_data
-
     - name: qdrant-data
       persistentVolumeClaim:
-        claimName: qdrant_storage
-
+        claimName: qdrant_data
     - name: zeroclaw-data
       persistentVolumeClaim:
         claimName: zeroclaw_data
+
+
+
