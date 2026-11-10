@@ -3,3 +3,11 @@ alias c := container
 
 container build:
     podman build -f Containerfile.hanaclaw --build-arg ZEROCLAW_BUILD_ID=$(git describe --always --dirty --dirty="-dirty") -t ghcr.io/seungjin/hanaclaw:latest ../
+
+# Fedora minimal variant (lean server image)
+fedora-build:
+    podman build -f Containerfile.hanaclaw-podman --target runtime --build-arg ZEROCLAW_BUILD_ID=$(git describe --always --dirty --dirty="-dirty") -t ghcr.io/seungjin/hanaclaw:latest ../
+
+# Fedora minimal variant plus a nested/rootless Podman CLI
+fedora-build-podman:
+    podman build -f Containerfile.hanaclaw-podman --target podman-image --build-arg ZEROCLAW_BUILD_ID=$(git describe --always --dirty --dirty="-dirty") -t ghcr.io/seungjin/hanaclaw-podman:latest ../
