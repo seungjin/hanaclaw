@@ -26,6 +26,10 @@
 ARG ZEROCLAW_CARGO_FLAGS="--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-discord,channel-email,channel-filesystem,channel-git,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,observability-prometheus,plugins-wasm-cranelift,schema-export,tool-claude-code,tool-claude-code-runner,tool-codex-cli,tool-composio,tool-gemini-cli,tool-google-workspace,tool-jira,tool-linkedin,tool-microsoft365,tool-notion,tool-opencode-cli,tool-project-intel,tools-external,whatsapp-web"
 # >>> end generated:container-standard <<<
 
+# The ARG above is global. The builder re-declares it before expanding it;
+# without that re-declaration the stage sees an empty value and cargo builds
+# with its default features, which have no `plugin` subcommand.
+
 # ── Stage: web-builder (OpenAPI spec -> TS client -> Vite bundle) ──
 FROM registry.fedoraproject.org/fedora-minimal:latest AS web-builder
 
@@ -130,6 +134,11 @@ RUN cp /tmp/spec-dump/api-descriptions.ts /tmp/spec-dump/api-enums.ts web/src/li
 # ── Stage: builder (zeroclaw + zerocode, Fedora-native binaries) ──
 FROM registry.fedoraproject.org/fedora-minimal:latest AS builder
 
+# Re-declare the global feature ARG so this stage can expand it, then pin it as
+# the stage's ENV so both the prefetch and the real build see one value.
+ARG ZEROCLAW_CARGO_FLAGS
+ENV ZEROCLAW_CARGO_FLAGS=${ZEROCLAW_CARGO_FLAGS}
+
 RUN microdnf install -y --setopt=install_weak_deps=0 \
         cargo gcc gcc-c++ make cmake \
         pkgconf-pkg-config openssl-devel zlib-ng-compat-devel sqlite-devel \
@@ -223,9 +232,21 @@ RUN --mount=type=cache,id=hanaclaw-cargo-registry,target=/root/.cargo/registry,s
            target/release/deps/zerocode-* \
            target/release/build/zerocode-* \
            target/release/incremental/zerocode-* \
-    && cargo build --offline --frozen --release -p zeroclaw -p zerocode ${ZEROCLAW_CARGO_FLAGS} \
+    && if [ -z "$ZEROCLAW_CARGO_FLAGS" ]; then \
+         echo "ERROR: ZEROCLAW_CARGO_FLAGS is empty; the feature ARG was not passed to this stage" >&2; \
+         exit 1; \
+       fi \
+    && cargo build --offline --frozen --release -p zeroclaw -p zerocode $ZEROCLAW_CARGO_FLAGS \
     && cp target/release/zeroclaw /src/zeroclaw \
     && cp target/release/zerocode /src/zerocode
+
+# The Fedora build must ship the plugin host: `plugin` is gated behind the
+# `plugins-wasm` feature, and a default-feature binary lacks the subcommand.
+RUN zeroclaw_bin=/src/zeroclaw; \
+    "$zeroclaw_bin" plugin --help >/dev/null 2>&1 || { \
+      echo "ERROR: $zeroclaw_bin has no 'plugin' subcommand; ZEROCLAW_CARGO_FLAGS was not applied" >&2; \
+      exit 1; \
+    }
 
 RUN for binary in zeroclaw zerocode; do \
       size=$(stat -c%s "/src/$binary"); \
