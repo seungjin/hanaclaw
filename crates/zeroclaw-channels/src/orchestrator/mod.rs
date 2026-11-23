@@ -1902,7 +1902,8 @@ fn is_stop_command(content: &str) -> bool {
 }
 
 fn stop_reply_message(msg: &ChannelMessage, reply: impl Into<String>) -> SendMessage {
-    SendMessage::reply_to(msg, reply)
+    // Operational /stop acks are system text, not conversational replies.
+    SendMessage::reply_to(msg, reply).suppress_voice()
 }
 
 /// Every XML-ish element name that opens a tool-CALL envelope, longest first so
@@ -5643,7 +5644,10 @@ async fn handle_runtime_command_for_delivery(
         ),
     };
 
-    if let Err(err) = channel.send(&SendMessage::reply_to(msg, response)).await {
+    if let Err(err) = channel
+        .send(&SendMessage::reply_to(msg, response).suppress_voice())
+        .await
+    {
         ::zeroclaw_log::record!(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -22640,10 +22644,52 @@ temperature = 0.3
             },
         );
 
+        // A predecessor still serving `first`: an instance that is cancelled
+        // or fails before publishing must neither replace nor remove it.
+        struct PredecessorOwner;
+        impl zeroclaw_api::conversation_binding::ConversationBindingOwner for PredecessorOwner {
+            fn load(
+                &self,
+                _binding: &zeroclaw_api::conversation_binding::ConversationBinding,
+            ) -> anyhow::Result<Vec<zeroclaw_api::model_provider::ChatMessage>> {
+                Ok(Vec::new())
+            }
+            fn append(
+                &self,
+                _binding: &zeroclaw_api::conversation_binding::ConversationBinding,
+                _messages: &[zeroclaw_api::model_provider::ChatMessage],
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+        let first_owner = || {
+            zeroclaw_infra::conversation_owners::conversation_owner(
+                zeroclaw_api::conversation_binding::ConversationSurface::Channel,
+                "first",
+            )
+        };
+        let same_owner = |a: &Arc<
+            dyn zeroclaw_api::conversation_binding::ConversationBindingOwner,
+        >,
+                          b: &Arc<
+            dyn zeroclaw_api::conversation_binding::ConversationBindingOwner,
+        >| {
+            std::ptr::eq(Arc::as_ptr(a).cast::<()>(), Arc::as_ptr(b).cast::<()>())
+        };
+
         // Exercise preparation cancellation, cancellation at the writer wait,
         // a later agent's failure, and a clean retry through the same entrypoint.
         for scenario in ["preparing", "writer-wait", "later-agent-failure", "retry"] {
             prepare_live_channel_registry(true);
+            let predecessor: Arc<dyn zeroclaw_api::conversation_binding::ConversationBindingOwner> =
+                Arc::new(PredecessorOwner);
+            let mut predecessor_lease = Some(
+                zeroclaw_infra::conversation_owners::publish_conversation_owner(
+                    zeroclaw_api::conversation_binding::ConversationSurface::Channel,
+                    "first",
+                    Arc::clone(&predecessor),
+                ),
+            );
             let mut attempt_config = config.clone();
             if scenario == "later-agent-failure" {
                 let mut invalid = attempt_config.agents["first"].clone();
@@ -22697,6 +22743,10 @@ temperature = 0.3
                 0,
                 "{scenario}: listener started during preparation"
             );
+            assert!(
+                first_owner().is_some_and(|owner| same_owner(&owner, &predecessor)),
+                "{scenario}: conversation owner replaced during preparation"
+            );
             if scenario == "preparing" || scenario == "writer-wait" {
                 let lock = zeroclaw_config::write_lock::shared_config_write_lock();
                 let guard = lock.lock().await;
@@ -22718,6 +22768,10 @@ temperature = 0.3
                     .unwrap();
                 assert!(live_channel_map().is_empty());
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert!(
+                    first_owner().is_some_and(|owner| same_owner(&owner, &predecessor)),
+                    "{scenario}: a cancelled instance replaced or removed the serving owner"
+                );
                 drop(guard);
             } else if scenario == "later-agent-failure" {
                 probe.release.notify_one();
@@ -22729,6 +22783,10 @@ temperature = 0.3
                 assert!(format!("{error:#}").contains("second"));
                 assert!(live_channel_map().is_empty());
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert!(
+                    first_owner().is_some_and(|owner| same_owner(&owner, &predecessor)),
+                    "{scenario}: a failed instance replaced or removed the serving owner"
+                );
             } else {
                 probe.release.notify_one();
                 tokio::time::timeout(Duration::from_secs(5), async {
@@ -22740,6 +22798,18 @@ temperature = 0.3
                 .unwrap();
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
                 assert!(live_channel_map().contains_key("startup-probe.startup-probe"));
+                assert!(
+                    first_owner().is_some_and(|owner| !same_owner(&owner, &predecessor)),
+                    "a published instance serves `first` itself"
+                );
+                // The order that matters in production: the successor is
+                // serving when the replaced instance shuts down and drops its
+                // lease. The successor must stay published.
+                drop(predecessor_lease.take());
+                assert!(
+                    first_owner().is_some_and(|owner| !same_owner(&owner, &predecessor)),
+                    "the replaced instance's lease removed its successor"
+                );
                 cancel.cancel();
                 tokio::time::timeout(Duration::from_secs(5), task)
                     .await
@@ -22747,7 +22817,18 @@ temperature = 0.3
                     .unwrap()
                     .unwrap();
                 assert!(live_channel_map().is_empty());
+                assert!(
+                    first_owner().is_none(),
+                    "a stopped instance leaves no owner behind"
+                );
             }
+            // Cleanup: where the stand-in was never replaced, its still-current
+            // lease removes it, so no owner leaks into the next scenario.
+            drop(predecessor_lease.take());
+            assert!(
+                first_owner().is_none(),
+                "{scenario}: an owner was left published"
+            );
         }
     }
 
@@ -46408,6 +46489,72 @@ BTC is currently around $65,000 based on latest tool output."#
         let reply = stop_reply_message(&message, "stop requested");
 
         assert_full_email_reply_chain(&reply);
+    }
+
+    #[test]
+    fn stop_reply_message_suppresses_voice() {
+        let message = zeroclaw_api::channel::ChannelMessage {
+            id: "msg-stop".to_string(),
+            sender: "alice".to_string(),
+            reply_target: "chat-42".to_string(),
+            content: "/stop".to_string(),
+            channel: "telegram".into(),
+            channel_alias: None,
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            subject: None,
+            ..Default::default()
+        };
+        let reply = stop_reply_message(&message, "stop requested");
+        assert!(
+            reply.suppress_voice,
+            "/stop acknowledgements must stay out of conversational TTS"
+        );
+        assert_eq!(reply.recipient, "chat-42");
+        assert!(!reply.force_voice);
+    }
+
+    #[tokio::test]
+    async fn runtime_command_responses_suppress_voice() {
+        // /thinking and other operational replies share one send site; they
+        // must not enter conversational voice routing (Telegram TTS / voice-
+        // only peers).
+        let channel_impl = Arc::new(SendMessageRecordingChannel::telegram(false));
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut ctx = channel_runtime_context_for_defaults_test(
+            tmp.path(),
+            "agentX",
+            "openrouter.default",
+            "default-model",
+        );
+        ctx.channels_by_name = Arc::new(HashMap::from([(
+            channel.name().to_string(),
+            Arc::clone(&channel),
+        )]));
+
+        let mut msg = scope_test_msg("alice", "telegram", None);
+        msg.content = "/thinking high".into();
+        assert!(
+            handle_runtime_command_if_needed(&ctx, &msg, Some(&channel)).await,
+            "runtime command should be handled"
+        );
+
+        let sent = channel_impl.sent_messages.lock().await;
+        assert_eq!(
+            sent.len(),
+            1,
+            "expected one operational reply, got {sent:?}"
+        );
+        assert!(
+            sent[0].suppress_voice,
+            "runtime-command reply must suppress voice, got {:?}",
+            sent[0]
+        );
+        assert!(!sent[0].force_voice);
+        assert_eq!(sent[0].recipient, msg.reply_target);
     }
 
     #[tokio::test]
